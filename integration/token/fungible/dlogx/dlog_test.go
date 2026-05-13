@@ -7,6 +7,8 @@ SPDX-License-Identifier: Apache-2.0
 package dlogx
 
 import (
+	"time"
+
 	integration2 "github.com/LFDT-Panurus/panurus/integration"
 	"github.com/LFDT-Panurus/panurus/integration/nwo/token"
 	"github.com/LFDT-Panurus/panurus/integration/nwo/token/generators/crypto/zkatdlognoghv1"
@@ -21,6 +23,7 @@ import (
 	"github.com/hyperledger-labs/fabric-smart-client/integration/nwo/fsc"
 	"github.com/hyperledger-labs/fabric-smart-client/pkg/node"
 	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
 )
 
 // namespacePolicy2of3 requires signatures from 2 out of the 3 orgs (Org1, Org2, Org3) to
@@ -152,7 +155,7 @@ var _ = Describe("EndToEnd", func() {
 	}
 })
 
-func newTestSuite(commType fsc.P2PCommunicationType, mask int, factor int, tokenSelector string, names ...string) (*integration.TestSuite, *token2.ReplicaSelector) {
+func newTestSuite(commType fsc.P2PCommunicationType, mask int, factor int, tokenSelector string, names ...string) (*fabricxTestSuite, *token2.ReplicaSelector) {
 	opts, selector := token2.NewReplicationOptions(factor, names...)
 	tmsOpts := common.Opts{
 		Backend:  fabricx.PlatformName, // select fabricx platform for NWO
@@ -178,19 +181,47 @@ func newTestSuite(commType fsc.P2PCommunicationType, mask int, factor int, token
 		tmsOpts.NamespacePolicy = namespacePolicy2of3
 	}
 
-	ts := integration.NewTestSuite(func() (*integration.Infrastructure, error) {
+	ts := &fabricxTestSuite{}
+	ts.generator = func() (*integration.Infrastructure, error) {
 		i, err := integration.New(StartPortDlog(), "./testdata", topology.Topology(tmsOpts)...)
+		if err != nil {
+			return i, err
+		}
 		i.DeleteOnStart = true
 		i.DeleteOnStop = false
 		if integration.WithRaceDetection {
 			i.EnableRaceDetector()
 		}
-		i.RegisterPlatformFactory(fabricx.NewPlatformFactory())
-		i.RegisterPlatformFactory(token.NewPlatformFactory(i))
-		i.Generate()
 
-		return i, err
-	})
+		return i, nil
+	}
 
 	return ts, selector
+}
+
+// fabricxTestSuite extends token2.TestSuite to add fabricx platform factory registration
+type fabricxTestSuite struct {
+	generator func() (*integration.Infrastructure, error)
+	II        *integration.Infrastructure
+}
+
+func (s *fabricxTestSuite) TearDown() {
+	s.II.Stop()
+}
+
+func (s *fabricxTestSuite) Setup() {
+	// Create the integration infrastructure
+	network, err := s.generator()
+	Expect(err).NotTo(HaveOccurred())
+	s.II = network
+	// Register both fabricx and token platform factories
+	network.RegisterPlatformFactory(fabricx.NewPlatformFactory())
+	network.RegisterPlatformFactory(token.NewPlatformFactory(s.II))
+	network.Generate()
+	network.Start()
+	// Sleep for a while to allow the networks to be ready, mirroring
+	// integration.TestSuite.Setup. Without this wait the first view (e.g. issue)
+	// can run before the issuer node's client is up and public params are
+	// installed, failing with "cannot retrieve public params".
+	time.Sleep(3 * time.Second)
 }

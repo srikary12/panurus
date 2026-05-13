@@ -39,7 +39,7 @@ func RunUnspentTokensIteratorByPreparedComparison(b *testing.B, store *TokenStor
 			cfg,
 			func() *TokenStore { return store },
 			func(s *TokenStore) error {
-				it, err := s.UnspentTokensIteratorBy(context.Background(), walletID, tokenType)
+				it, err := s.UnspentTokensIteratorBy(context.Background(), walletID, tokenType, 0)
 				if err != nil {
 					return err
 				}

@@ -181,6 +181,10 @@ func Topology(opts common.Opts) []api.Topology {
 		}
 	}
 
+	// Add bootstrap node before creating node list
+	bootstrapNode := fscTopology.AddNodeByName("lib-p2p-bootstrap-node")
+	fscTopology.SetBootstrapNode(bootstrapNode)
+
 	tokenTopology := token.NewTopology()
 	tokenTopology.TokenSelector = opts.TokenSelector
 	tms := tokenTopology.AddTMS(fscTopology.ListNodes(), backendTopology, backendChannel, opts.DefaultTMSOpts.TokenSDKDriver)
@@ -205,7 +209,6 @@ func Topology(opts common.Opts) []api.Topology {
 		fabric2.SetOrgs(tms, "Org1")
 	}
 	nodeList := fscTopology.ListNodes()
-	fscTopology.SetBootstrapNode(fscTopology.AddNodeByName("lib-p2p-bootstrap-node"))
 
 	if !opts.NoAuditor {
 		tms.AddAuditor(auditor)
