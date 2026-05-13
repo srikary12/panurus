@@ -43,16 +43,13 @@ type Selector struct {
 	locker    TokenLocker
 	precision uint64
 	metrics   *Metrics
-	mu        sync.Mutex // protects cache field for concurrent Close() calls
+	mu        sync.Mutex   // protects cache pointer reads/writes
+	selectMu  sync.RWMutex // RLock held during selection; Close takes write lock to drain in-flight selects
 
 	// Resource limits to prevent algorithmic attacks
 	maxTokensPerSelection int
 	maxLockAttempts       int
 	selectionTimeout      time.Duration
-
-	// Resource tracking counters (reset per selection)
-	tokensIteratedCount int
-	lockAttemptsCount   int
 }
 
 type StubbornSelector struct {
@@ -64,37 +61,20 @@ type StubbornSelector struct {
 	// However, it might be that we don't have a livelock, but we are simply out of funds.
 	// Instead of polling forever, we can abort after a certain amount of attempts.
 	maxRetriesAfterBackoff int
-	// Maximum number of outer retry cycles (enforced at StubbornSelector level)
-	maxRetryCycles int
 }
 
 func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, error) {
 	start := time.Now()
 
-	// Reset resource tracking counters for this selection
-	m.tokensIteratedCount = 0
-	m.lockAttemptsCount = 0
-
 	// Create timeout context if configured
 	timeoutCtx, cancel := context.WithTimeout(ctx, m.selectionTimeout)
 	defer cancel()
 
+	var tokensIterated, lockAttempts int
 	for retriesAfterBackoff := 0; retriesAfterBackoff <= m.maxRetriesAfterBackoff; retriesAfterBackoff++ {
-		// Check retry cycle limit
-		if retriesAfterBackoff > m.maxRetryCycles {
-			if err := m.locker.UnlockAll(ctx); err != nil {
-				m.logger.Errorf("failed to unlock tokens after exceeding retry cycles: %s", err)
-			}
-			m.metrics.SelectionDuration.Observe(time.Since(start).Seconds())
-			m.metrics.SelectionOutcome.With(outcomeLabel, "error").Add(1)
-
-			return nil, nil, errors.Errorf(
-				"token selection aborted: exceeded max retry cycles (%d) after examining %d tokens and %d lock attempts",
-				m.maxRetryCycles, m.tokensIteratedCount, m.lockAttemptsCount,
-			)
-		}
-
-		if tokens, quantity, err := m.selectWithoutMetrics(timeoutCtx, ownerFilter, q, tokenType); err == nil || !errors.Is(err, token.SelectorSufficientButLockedFunds) {
+		if tokens, quantity, ti, la, err := m.selectWithoutMetrics(timeoutCtx, ownerFilter, q, tokenType); err == nil || !errors.Is(err, token.SelectorSufficientButLockedFunds) {
+			tokensIterated += ti
+			lockAttempts += la
 			m.metrics.SelectionDuration.Observe(time.Since(start).Seconds())
 
 			// Check if we hit the selector's own timeout (not the caller's context cancellation).
@@ -102,23 +82,12 @@ func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFi
 				if unlockErr := m.locker.UnlockAll(ctx); unlockErr != nil {
 					m.logger.Errorf("failed to unlock tokens after timeout: %s", unlockErr)
 				}
-				// If the caller's context is still alive, this is our own selectionTimeout firing.
-				// If tokens were seen but contended, surface as SelectorSufficientButLockedFunds
-				// so callers can distinguish contention from genuine system failures.
-				if ctx.Err() == nil && m.lockAttemptsCount > 0 {
-					m.metrics.SelectionOutcome.With(outcomeLabel, "locked_funds").Add(1)
+				m.metrics.SelectionOutcome.With(outcomeLabel, "timeout").Add(1)
 
-					return nil, nil, errors.Wrapf(
-						token.SelectorSufficientButLockedFunds,
-						"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts",
-						m.selectionTimeout, m.tokensIteratedCount, m.lockAttemptsCount,
-					)
-				}
-				m.metrics.SelectionOutcome.With(outcomeLabel, "error").Add(1)
-
-				return nil, nil, fmt.Errorf(
-					"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts: %w",
-					m.selectionTimeout, m.tokensIteratedCount, m.lockAttemptsCount, err,
+				return nil, nil, errors.Wrapf(
+					token.SelectorTimedOut,
+					"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts",
+					m.selectionTimeout, tokensIterated, lockAttempts,
 				)
 			}
 
@@ -138,6 +107,9 @@ func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFi
 			}
 
 			return tokens, quantity, err
+		} else {
+			tokensIterated += ti
+			lockAttempts += la
 		}
 		var backoffDuration time.Duration
 		if m.backoffInterval > 0 {
@@ -156,15 +128,13 @@ func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFi
 			m.metrics.SelectionDuration.Observe(time.Since(start).Seconds())
 
 			// If the caller's context is still alive, the timeout is our own selectionTimeout.
-			// Tokens are contended (we already went through one SelectorSufficientButLockedFunds cycle
-			// to get here), so surface as SelectorSufficientButLockedFunds so callers can retry.
 			if errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
-				m.metrics.SelectionOutcome.With(outcomeLabel, "locked_funds").Add(1)
+				m.metrics.SelectionOutcome.With(outcomeLabel, "timeout").Add(1)
 
 				return nil, nil, errors.Wrapf(
-					token.SelectorSufficientButLockedFunds,
+					token.SelectorTimedOut,
 					"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts",
-					m.selectionTimeout, m.tokensIteratedCount, m.lockAttemptsCount,
+					m.selectionTimeout, tokensIterated, lockAttempts,
 				)
 			}
 
@@ -182,12 +152,11 @@ func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFi
 }
 
 func NewStubbornSelector(logger logging.Logger, tokenDB TokenFetcher, lockDB TokenLocker, precision uint64, backoff time.Duration,
-	    retries int, maxTokensPerSelection int, maxLockAttempts int, maxRetryCycles int, selectionTimeout time.Duration, m *Metrics) *StubbornSelector {
+	retries int, maxTokensPerSelection int, maxLockAttempts int, selectionTimeout time.Duration, m *Metrics) *StubbornSelector {
 	return &StubbornSelector{
 		Selector:               NewSelector(logger, tokenDB, lockDB, precision, maxTokensPerSelection, maxLockAttempts, selectionTimeout, m),
 		backoffInterval:        backoff,
 		maxRetriesAfterBackoff: retries,
-		maxRetryCycles:         maxRetryCycles,
 	}
 }
 
@@ -206,17 +175,18 @@ func NewSelector(logger logging.Logger, tokenDB TokenFetcher, lockDB TokenLocker
 }
 
 func (s *Selector) Select(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, error) {
-	start := time.Now()
+	// Hold selectMu for the duration of the selection so that Close() waits
+	// for in-flight iterations to complete before calling cache.Close().
+	s.selectMu.RLock()
+	defer s.selectMu.RUnlock()
 
-	// Reset resource tracking counters for this selection
-	s.tokensIteratedCount = 0
-	s.lockAttemptsCount = 0
+	start := time.Now()
 
 	// Create timeout context if configured
 	timeoutCtx, cancel := context.WithTimeout(ctx, s.selectionTimeout)
 	defer cancel()
 
-	ids, quantity, immediateRetries, err := s.selectInternal(timeoutCtx, owner, q, tokenType)
+	ids, quantity, immediateRetries, tokensIterated, lockAttempts, err := s.selectInternal(timeoutCtx, owner, q, tokenType)
 
 	// Check if we hit the timeout
 	if errors.Is(err, context.DeadlineExceeded) {
@@ -225,11 +195,12 @@ func (s *Selector) Select(ctx context.Context, owner token.OwnerFilter, q string
 			s.logger.Warnf("failed to unlock tokens after timeout: %v", err2)
 		}
 		s.metrics.SelectionDuration.Observe(time.Since(start).Seconds())
-		s.metrics.SelectionOutcome.With(outcomeLabel, "error").Add(1)
+		s.metrics.SelectionOutcome.With(outcomeLabel, "timeout").Add(1)
 
-		return nil, nil, fmt.Errorf(
-			"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts: %w",
-			s.selectionTimeout, s.tokensIteratedCount, s.lockAttemptsCount, err,
+		return nil, nil, errors.Wrapf(
+			token.SelectorTimedOut,
+			"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts",
+			s.selectionTimeout, tokensIterated, lockAttempts,
 		)
 	}
 
@@ -256,38 +227,38 @@ func (s *Selector) Select(ctx context.Context, owner token.OwnerFilter, q string
 // selectWithoutMetrics is used by StubbornSelector to avoid double-counting metrics.
 // Note: Does not call UnlockAll on error - the caller is responsible for cleanup.
 // This avoids attempting to unlock with a cancelled context.
-func (s *Selector) selectWithoutMetrics(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, error) {
-	ids, quantity, _, err := s.selectInternal(ctx, owner, q, tokenType)
+func (s *Selector) selectWithoutMetrics(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, int, int, error) {
+	ids, quantity, _, tokensIterated, lockAttempts, err := s.selectInternal(ctx, owner, q, tokenType)
 
-	return ids, quantity, err
+	return ids, quantity, tokensIterated, lockAttempts, err
 }
 
-func (s *Selector) selectInternal(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, int, error) {
-	if s.isClosed() {
-		return nil, nil, 0, errors.Errorf("selector is already closed")
-	}
-	quantity, err := token2.ToQuantity(q, s.precision)
-	if err != nil {
-		return nil, nil, 0, errors.Wrapf(err, "failed to create quantity")
+func (s *Selector) selectInternal(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, int, int, int, error) {
+	// Take mu to snapshot s.cache into a local variable, then release the lock
+	// and work exclusively through the local copy. This eliminates the data race
+	// between selectInternal reads of s.cache and a concurrent Close() write.
+	// On the cache-reload path we take mu again to publish the new iterator so
+	// that a concurrent Close() can still call Close() on it.
+	s.mu.Lock()
+	cache := s.cache
+	s.mu.Unlock()
+	if cache == nil {
+		return nil, nil, 0, 0, 0, errors.Errorf("selector is already closed")
 	}
 
-	// Initialize cache on first use if not already set
-	if s.cache == nil {
-		s.logger.DebugfContext(ctx, "Initializing token cache for first selection")
-		if s.cache, err = s.fetcher.UnspentTokensIteratorBy(ctx, owner.ID(), tokenType, 0); err != nil {
-			return nil, nil, 0, errors.Wrapf(err, "failed to initialize token cache for [%s:%s]", owner.ID(), tokenType)
-		}
+	quantity, err := token2.ToQuantity(q, s.precision)
+	if err != nil {
+		return nil, nil, 0, 0, 0, errors.Wrapf(err, "failed to create quantity")
 	}
 
 	sum, selected, tokensLockedByOthersExist, immediateRetries := token2.NewZeroQuantity(s.precision), collections.NewSet[*token2.ID](), true, 0
+	tokensIterated, lockAttempts := 0, 0
 	for {
-		// next reads the cache under s.mu and reports an error if a concurrent
-		// Close has already nilled it.
-		if t, err := s.next(); err != nil {
-			return nil, nil, immediateRetries, errors.Wrapf(err, "failed to get tokens for [%s:%s]", owner.ID(), tokenType)
+		if t, err := cache.Next(); err != nil {
+			return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Wrapf(err, "failed to get tokens for [%s:%s]", owner.ID(), tokenType)
 		} else if t == nil {
 			if !tokensLockedByOthersExist {
-				return nil, nil, immediateRetries, errors.Wrapf(
+				return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Wrapf(
 					token.SelectorInsufficientFunds,
 					"insufficient funds, only [%s] tokens of type [%s] are available, but [%s] were requested and no other process has any tokens locked",
 					sum.Decimal(),
@@ -304,43 +275,47 @@ func (s *Selector) selectInternal(ctx context.Context, owner token.OwnerFilter, 
 				// we retry to fetch, in case the other process did not spend and unlocked the token meanwhile.
 				// We do not unlock our tokens, yet.
 				// After some retries, we unlock the tokens and return a token.SelectorInsufficientFunds error
-				return nil, nil, immediateRetries, token.SelectorSufficientButLockedFunds
+				return nil, nil, immediateRetries, tokensIterated, lockAttempts, token.SelectorSufficientButLockedFunds
 			}
 
 			s.logger.DebugfContext(ctx, "Fetch all non-deleted tokens from the DB and refresh the token cache.")
-			it, err := s.fetcher.UnspentTokensIteratorBy(ctx, owner.ID(), tokenType, 0)
-			if err != nil {
-				return nil, nil, immediateRetries, errors.Wrapf(err, "failed to reload tokens for retry %d [%s:%s]", immediateRetries, owner.ID(), tokenType)
+			newCache, fetchErr := s.fetcher.UnspentTokensIteratorBy(ctx, owner.ID(), tokenType, 0)
+			if fetchErr != nil {
+				return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Wrapf(fetchErr, "failed to reload tokens for retry %d [%s:%s]", immediateRetries, owner.ID(), tokenType)
 			}
-			if err := s.swapCache(it); err != nil {
-				return nil, nil, immediateRetries, err
+			// swapCache publishes the new iterator under s.mu, so a concurrent
+			// Close() can still close it, and closes the one it displaces, so a
+			// refresh does not abandon a database cursor per retry.
+			if err := s.swapCache(newCache); err != nil {
+				return nil, nil, immediateRetries, tokensIterated, lockAttempts, err
 			}
+			cache = newCache
 
 			immediateRetries++
 			tokensLockedByOthersExist = false
 		} else {
 			// Check token iteration limit (only count actual tokens, not nil)
-			s.tokensIteratedCount++
-			if s.tokensIteratedCount > s.maxTokensPerSelection {
-				return nil, nil, immediateRetries, errors.Errorf(
+			tokensIterated++
+			if tokensIterated > s.maxTokensPerSelection {
+				return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Errorf(
 					"token selection aborted: exceeded max token iteration limit (%d tokens)",
 					s.maxTokensPerSelection,
 				)
 			}
 
 			// Check lock attempt limit
-			s.lockAttemptsCount++
-			if s.lockAttemptsCount > s.maxLockAttempts {
-				return nil, nil, immediateRetries, errors.Errorf(
+			lockAttempts++
+			if lockAttempts > s.maxLockAttempts {
+				return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Errorf(
 					"token selection aborted: exceeded max lock attempts (%d) after examining %d tokens",
-					s.maxLockAttempts, s.tokensIteratedCount,
+					s.maxLockAttempts, tokensIterated,
 				)
 			}
 
 			if locked, lockErr := s.locker.TryLock(ctx, &t.Id, owner.ID()); !locked {
 				// A rate-limit denial from the locker is a hard stop: abort instead of retrying.
 				if errors.Is(lockErr, token.SelectorRateLimited) {
-					return nil, nil, immediateRetries, lockErr
+					return nil, nil, immediateRetries, tokensIterated, lockAttempts, lockErr
 				}
 				s.logger.DebugfContext(ctx, "Tried to lock token [%v], but it was already locked by another process", t)
 				tokensLockedByOthersExist = true
@@ -348,35 +323,21 @@ func (s *Selector) selectInternal(ctx context.Context, owner token.OwnerFilter, 
 				s.logger.DebugfContext(ctx, "Got the lock on token [%v]", t)
 				q, err := token2.ToQuantity(t.Quantity, s.precision)
 				if err != nil {
-					return nil, nil, immediateRetries, errors.Wrapf(err, "invalid token [%s] found", t.Id)
+					return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Wrapf(err, "invalid token [%s] found", t.Id)
 				}
 				s.logger.DebugfContext(ctx, "Found token [%s] to add: [%s:%s].", t.Id, q.Decimal(), t.Type)
 				immediateRetries = 0
 				sum, err = sum.Add(q)
 				if err != nil {
-					return nil, nil, immediateRetries, errors.Wrapf(err, "failed to add quantity")
+					return nil, nil, immediateRetries, tokensIterated, lockAttempts, errors.Wrapf(err, "failed to add quantity")
 				}
 				selected.Add(&t.Id)
 				if sum.Cmp(quantity) >= 0 {
-					return selected.ToSlice(), sum, immediateRetries, nil
+					return selected.ToSlice(), sum, immediateRetries, tokensIterated, lockAttempts, nil
 				}
 			}
 		}
 	}
-}
-
-// next returns the next token of the current cache. It holds s.mu for the whole
-// call so that a concurrent Close cannot swap the iterator out, or nil it, while
-// it is being read. It reports an error if the selector has already been closed.
-func (s *Selector) next() (*token2.UnspentTokenInWallet, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.cache == nil {
-		return nil, errors.New("selector is already closed")
-	}
-
-	return s.cache.Next()
 }
 
 // swapCache installs it as the new token cache and closes the iterator it
@@ -399,6 +360,12 @@ func (s *Selector) swapCache(it Iterator[*token2.UnspentTokenInWallet]) error {
 }
 
 func (s *Selector) Close() error {
+	// Acquire the write side of selectMu to drain any in-flight Select()
+	// calls before touching the iterator. This prevents cache.Close() from
+	// racing with cache.Next() inside selectInternal.
+	s.selectMu.Lock()
+	defer s.selectMu.Unlock()
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -409,13 +376,6 @@ func (s *Selector) Close() error {
 	s.cache = nil
 
 	return nil
-}
-
-func (s *Selector) isClosed() bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	return s.cache == nil
 }
 
 func (s *Selector) UnlockAll(ctx context.Context) error {
@@ -445,12 +405,12 @@ func (l *locker) UnlockAll(ctx context.Context) error {
 }
 
 func NewSherdSelector(txID transaction.ID, fetcher TokenFetcher, lockDB Locker, precision uint64, backoff time.Duration,
-		maxRetriesAfterBackoff int, maxTokensPerSelection int, maxLockAttempts int, maxRetryCycles int, selectionTimeout time.Duration, m *Metrics) TokenSelectorUnlocker {
+	maxRetriesAfterBackoff int, maxTokensPerSelection int, maxLockAttempts int, selectionTimeout time.Duration, m *Metrics) TokenSelectorUnlocker {
 	logger := logger.Named("selector-" + txID)
 	locker := &locker{txID: txID, Locker: lockDB}
 	if backoff < 0 {
 		return NewSelector(logger, fetcher, locker, precision, maxTokensPerSelection, maxLockAttempts, selectionTimeout, m)
 	} else {
-		return NewStubbornSelector(logger, fetcher, locker, precision, backoff, maxRetriesAfterBackoff, maxTokensPerSelection, maxLockAttempts, maxRetryCycles, selectionTimeout, m)
+		return NewStubbornSelector(logger, fetcher, locker, precision, backoff, maxRetriesAfterBackoff, maxTokensPerSelection, maxLockAttempts, selectionTimeout, m)
 	}
 }

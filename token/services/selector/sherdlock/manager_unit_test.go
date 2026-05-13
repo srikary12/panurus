@@ -32,7 +32,6 @@ func TestManagerUnit(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                metrics,
 	})

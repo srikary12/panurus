@@ -197,7 +197,6 @@ func NewSherdSelector(qs *testutils.MockQueryService, _ WalletIDByRawIdentityFun
 			testutils.SelectorNumRetries,
 			10000,          // maxTokensPerSelection
 			50000,          // maxLockAttempts
-			10,             // maxRetryCycles
 			30*time.Second, // selectionTimeout
 			sherdlock.NewMetrics(&disabled.Provider{}),
 		),

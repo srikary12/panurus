@@ -42,9 +42,6 @@ type Limits struct {
 	MaxRetries             int           `yaml:"maxRetries,omitempty"`
 	MaxLocksPerTransaction int           `yaml:"maxLocksPerTransaction,omitempty"`
 	SelectionTimeout       time.Duration `yaml:"selectionTimeout,omitempty"`
-
-	// Deprecated: Use MaxRetries instead
-	MaxRetryCycles int `yaml:"maxRetryCycles,omitempty"`
 }
 
 type Config struct {
@@ -143,10 +140,7 @@ func (c *Config) GetLimits() Limits {
 
 	// Handle MaxRetries with backward compatibility
 	if limits.MaxRetries <= 0 {
-		// Check deprecated fields for backward compatibility
-		if limits.MaxRetryCycles > 0 {
-			limits.MaxRetries = limits.MaxRetryCycles
-		} else if c.NumRetries > 0 {
+		if c.NumRetries > 0 {
 			limits.MaxRetries = c.NumRetries
 		} else {
 			limits.MaxRetries = defaultMaxRetries
@@ -173,12 +167,6 @@ func (c *Config) GetMaxLockAttempts() int {
 	return c.GetLimits().MaxLockAttempts
 }
 
-// GetMaxRetryCycles returns the maximum number of outer retry loops
-// Deprecated: Use GetLimits().MaxRetries instead
-func (c *Config) GetMaxRetryCycles() int {
-	return c.GetLimits().MaxRetries
-}
-
 // GetMaxLocksPerTransaction returns the maximum number of concurrent locks per transaction
 func (c *Config) GetMaxLocksPerTransaction() int {
 	return c.GetLimits().MaxLocksPerTransaction
@@ -189,32 +177,23 @@ func (c *Config) GetSelectionTimeout() time.Duration {
 	return c.GetLimits().SelectionTimeout
 }
 
-// Validate checks that the configuration is valid
+// Validate checks that the configuration is valid.
+// Zero values are allowed (they mean "use default"); only relational invariants
+// between explicit non-zero fields are checked.
 func (c *Config) Validate() error {
+	// Resolve effective values so relational checks use the same numbers that
+	// the runtime will actually apply.
 	limits := c.GetLimits()
 
-	if limits.MaxTokensPerSelection <= 0 {
-		return errors.Errorf("maxTokensPerSelection must be positive, got %d", limits.MaxTokensPerSelection)
-	}
-	if limits.MaxLockAttempts <= 0 {
-		return errors.Errorf("maxLockAttempts must be positive, got %d", limits.MaxLockAttempts)
-	}
-	if limits.MaxLockAttempts < limits.MaxTokensPerSelection {
+	if c.Limits.MaxLockAttempts > 0 && c.Limits.MaxTokensPerSelection > 0 &&
+		c.Limits.MaxLockAttempts < c.Limits.MaxTokensPerSelection {
 		return errors.Errorf("maxLockAttempts (%d) should be >= maxTokensPerSelection (%d)",
 			limits.MaxLockAttempts, limits.MaxTokensPerSelection)
 	}
-	if limits.MaxRetries <= 0 {
-		return errors.Errorf("maxRetries must be positive, got %d", limits.MaxRetries)
-	}
-	if limits.MaxLocksPerTransaction <= 0 {
-		return errors.Errorf("maxLocksPerTransaction must be positive, got %d", limits.MaxLocksPerTransaction)
-	}
-	if limits.MaxLocksPerTransaction > limits.MaxTokensPerSelection {
+	if c.Limits.MaxLocksPerTransaction > 0 && c.Limits.MaxTokensPerSelection > 0 &&
+		c.Limits.MaxLocksPerTransaction > c.Limits.MaxTokensPerSelection {
 		return errors.Errorf("maxLocksPerTransaction (%d) should be <= maxTokensPerSelection (%d)",
 			limits.MaxLocksPerTransaction, limits.MaxTokensPerSelection)
-	}
-	if limits.SelectionTimeout <= 0 {
-		return errors.Errorf("selectionTimeout must be positive, got %v", limits.SelectionTimeout)
 	}
 
 	return nil

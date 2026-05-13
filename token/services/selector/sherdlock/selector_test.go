@@ -89,7 +89,7 @@ func TestStubbornSelectorUnit(t *testing.T) {
 	t.Run("SelectSuccessAfterImmediateRetries", func(t *testing.T) {
 		mockFetcher := &mocks.FakeTokenFetcher{}
 		mockLocker := &mocks.FakeTokenLocker{}
-		s := sherdlock.NewStubbornSelector(sherdlock.Logger(), mockFetcher, mockLocker, 64, 100*time.Millisecond, 2, 10000, 50000, 10, 30*time.Second, metrics)
+		s := sherdlock.NewStubbornSelector(sherdlock.Logger(), mockFetcher, mockLocker, 64, 100*time.Millisecond, 2, 10000, 50000, 30*time.Second, metrics)
 
 		mockFetcher.UnspentTokensIteratorByStub = func(ctx context.Context, walletID string, tokenType token2.Type, limit int) (sherdlock.Iterator[*token2.UnspentTokenInWallet], error) {
 			mockIt := &mocks.FakeIterator[*token2.UnspentTokenInWallet]{}
@@ -116,7 +116,7 @@ func TestStubbornSelectorUnit(t *testing.T) {
 	t.Run("ContextCanceled", func(t *testing.T) {
 		mockFetcher := &mocks.FakeTokenFetcher{}
 		mockLocker := &mocks.FakeTokenLocker{}
-		s := sherdlock.NewStubbornSelector(sherdlock.Logger(), mockFetcher, mockLocker, 64, 100*time.Millisecond, 2, 10000, 50000, 10, 30*time.Second, metrics)
+		s := sherdlock.NewStubbornSelector(sherdlock.Logger(), mockFetcher, mockLocker, 64, 100*time.Millisecond, 2, 10000, 50000, 30*time.Second, metrics)
 
 		ctx, cancel := context.WithCancel(t.Context())
 		cancel()
@@ -146,7 +146,7 @@ func TestStubbornSelectorUnit(t *testing.T) {
 		}
 		mockLocker.TryLockReturns(false, nil)
 
-		shortBackoffS := sherdlock.NewStubbornSelector(sherdlock.Logger(), mockFetcher, mockLocker, 64, 1*time.Millisecond, 1, 10000, 50000, 10, 30*time.Second, metrics)
+		shortBackoffS := sherdlock.NewStubbornSelector(sherdlock.Logger(), mockFetcher, mockLocker, 64, 1*time.Millisecond, 1, 10000, 50000, 30*time.Second, metrics)
 		_, _, err := shortBackoffS.Select(t.Context(), &unitTestMockOwnerFilter{id: "alice"}, "50", "ABC")
 		require.Error(t, err)
 	})
@@ -223,6 +223,68 @@ func TestSelectorRateLimit(t *testing.T) {
 		assert.Equal(t, 3, mockLocker.TryLockCallCount())
 		// The abort path must release the already-locked tokens.
 		assert.Equal(t, 1, mockLocker.UnlockAllCallCount(), "selector must release locked tokens via UnlockAll on abort")
+	})
+}
+
+// TestSelectorTimeout verifies that when the configured selection timeout fires,
+// both Selector and StubbornSelector return an error wrapping token.SelectorTimedOut
+// (not SelectorSufficientButLockedFunds, which would incorrectly invite retries).
+//
+// The test sets up an iterator stub that is returned by UnspentTokensIteratorBy,
+// which receives the internal timeoutCtx as its first argument. The iterator's
+// Next method checks that context so the selector loop exits with
+// context.DeadlineExceeded once the timeout fires — exactly the error path that
+// must produce SelectorTimedOut.
+func TestSelectorTimeout(t *testing.T) {
+	_, metrics := setupMetricsMocks()
+
+	// makeFetcher returns a TokenFetcher whose UnspentTokensIteratorBy produces an
+	// iterator that respects the context it was called with (which is timeoutCtx
+	// inside selectInternal).  Next returns a token while the context is live; once
+	// the deadline fires it returns (nil, ctx.Err()) so selectInternal propagates
+	// context.DeadlineExceeded to Select / StubbornSelector.Select.
+	makeFetcher := func() *mocks.FakeTokenFetcher {
+		mockFetcher := &mocks.FakeTokenFetcher{}
+		mockFetcher.UnspentTokensIteratorByStub = func(ctx context.Context, _ string, _ token2.Type, _ int) (sherdlock.Iterator[*token2.UnspentTokenInWallet], error) {
+			it := &mocks.FakeIterator[*token2.UnspentTokenInWallet]{}
+			it.NextStub = func() (*token2.UnspentTokenInWallet, error) {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
+
+				return &token2.UnspentTokenInWallet{
+					Id:       token2.ID{TxId: "tx1", Index: 0},
+					Type:     "ABC",
+					Quantity: "1",
+				}, nil
+			}
+
+			return it, nil
+		}
+
+		return mockFetcher
+	}
+
+	t.Run("SelectorTimesOut", func(t *testing.T) {
+		mockLocker := &mocks.FakeTokenLocker{}
+		mockLocker.TryLockReturns(false, nil) // all tokens appear locked by others
+
+		s := sherdlock.NewSelector(sherdlock.Logger(), makeFetcher(), mockLocker, 64, 100000, 100000, 20*time.Millisecond, metrics)
+		_, _, err := s.Select(t.Context(), &unitTestMockOwnerFilter{id: "alice"}, "9999999", "ABC")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, token.SelectorTimedOut), "expected SelectorTimedOut, got: %v", err)
+		assert.False(t, errors.Is(err, token.SelectorSufficientButLockedFunds), "timeout must not be reported as SelectorSufficientButLockedFunds")
+	})
+
+	t.Run("StubbornSelectorTimesOut", func(t *testing.T) {
+		mockLocker := &mocks.FakeTokenLocker{}
+		mockLocker.TryLockReturns(false, nil)
+
+		s := sherdlock.NewStubbornSelector(sherdlock.Logger(), makeFetcher(), mockLocker, 64, 1*time.Millisecond, 100, 100000, 100000, 20*time.Millisecond, metrics)
+		_, _, err := s.Select(t.Context(), &unitTestMockOwnerFilter{id: "alice"}, "9999999", "ABC")
+		require.Error(t, err)
+		assert.True(t, errors.Is(err, token.SelectorTimedOut), "expected SelectorTimedOut, got: %v", err)
+		assert.False(t, errors.Is(err, token.SelectorSufficientButLockedFunds), "timeout must not be reported as SelectorSufficientButLockedFunds")
 	})
 }
 

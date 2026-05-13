@@ -46,7 +46,7 @@ func TestStubbornSelector_ContextCancellation(t *testing.T) {
 		// Use a backoff interval far exceeding the context timeout so ctx.Done()
 		// fires in the backoff select before time.After can.
 		sel := NewStubbornSelector(
-			logger, mockFetcher, mockLck, 64, time.Hour, 10, 10000, 50000, 10, 30*time.Second, m,
+			logger, mockFetcher, mockLck, 64, time.Hour, 10, 10000, 50000, 30*time.Second, m,
 		)
 
 		// 50 ms is far shorter than time.Hour backoff — ctx.Done() fires first.

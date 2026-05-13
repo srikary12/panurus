@@ -36,7 +36,6 @@ type Config struct {
 	LeaseCleanupTickPeriod time.Duration
 	MaxTokensPerSelection  int
 	MaxLockAttempts        int
-	MaxRetryCycles         int
 	SelectionTimeout       time.Duration
 	Metrics                *Metrics
 }
@@ -62,7 +61,7 @@ func NewManager(cfg *Config) *Manager {
 		cancel:                 cancel,
 		cleanerDone:            make(chan struct{}),
 		selectorCache: lazy2.NewProvider(func(txID transaction.ID) (TokenSelectorUnlocker, error) {
-			return NewSherdSelector(txID, cfg.Fetcher, cfg.Locker, cfg.Precision, cfg.Backoff, cfg.MaxRetriesAfterBackOff, cfg.MaxTokensPerSelection, cfg.MaxLockAttempts, cfg.MaxRetryCycles, cfg.SelectionTimeout, cfg.Metrics), nil
+			return NewSherdSelector(txID, cfg.Fetcher, cfg.Locker, cfg.Precision, cfg.Backoff, cfg.MaxRetriesAfterBackOff, cfg.MaxTokensPerSelection, cfg.MaxLockAttempts, cfg.SelectionTimeout, cfg.Metrics), nil
 		}),
 	}
 	if cfg.LeaseCleanupTickPeriod > 0 && cfg.LeaseExpiry > 0 {

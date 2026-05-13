@@ -133,7 +133,6 @@ func createManager(t *testing.T, pgConnStr string, backoff time.Duration, maxRet
 		// Keep the outer retry-cycle cap consistent with the per-test
 		// backoff-retry budget so it doesn't silently bind before it (the
 		// previous hardcoded 10 capped tests that requested more retries).
-		MaxRetryCycles: maxRetries,
 		// Generous wall-clock ceiling for tests: the backoff-retry budget is
 		// the real control. A tight timeout here makes the heavily-contended
 		// stress tests flaky on slow/loaded CI runners.
@@ -174,7 +173,6 @@ func TestNewManager(t *testing.T) {
 			LeaseCleanupTickPeriod: time.Minute,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -199,7 +197,6 @@ func TestNewManager(t *testing.T) {
 			LeaseCleanupTickPeriod: time.Minute,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -222,7 +219,6 @@ func TestNewManager(t *testing.T) {
 			LeaseCleanupTickPeriod: 0,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -246,7 +242,6 @@ func TestManager_NewSelector(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                NewMetrics(&disabled.Provider{}),
 	})
@@ -298,7 +293,6 @@ func TestManager_Unlock(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                NewMetrics(&disabled.Provider{}),
 	})
@@ -350,7 +344,6 @@ func TestManager_Close(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                NewMetrics(&disabled.Provider{}),
 	})
@@ -416,7 +409,6 @@ func TestManager_Cleaner(t *testing.T) {
 			LeaseCleanupTickPeriod: 50 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -459,7 +451,6 @@ func TestManager_Cleaner(t *testing.T) {
 			LeaseCleanupTickPeriod: 50 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -509,7 +500,6 @@ func TestManager_Cleaner(t *testing.T) {
 			LeaseCleanupTickPeriod: 50 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -558,7 +548,6 @@ func TestManager_Cleaner(t *testing.T) {
 			LeaseCleanupTickPeriod: 50 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -612,7 +601,6 @@ func TestManager_NewSelector_Concurrent(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                NewMetrics(&disabled.Provider{}),
 	})
@@ -663,7 +651,6 @@ func TestManager_Close_Concurrent(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                NewMetrics(&disabled.Provider{}),
 	})
@@ -716,7 +703,6 @@ func TestManager_Unlock_EdgeCases(t *testing.T) {
 		LeaseCleanupTickPeriod: 0,
 		MaxTokensPerSelection:  10000,
 		MaxLockAttempts:        50000,
-		MaxRetryCycles:         10,
 		SelectionTimeout:       30 * time.Second,
 		Metrics:                NewMetrics(&disabled.Provider{}),
 	})
@@ -774,7 +760,6 @@ func TestManager_Cleaner_EdgeCases(t *testing.T) {
 			LeaseCleanupTickPeriod: 10 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -815,7 +800,6 @@ func TestManager_Cleaner_EdgeCases(t *testing.T) {
 			LeaseCleanupTickPeriod: 10 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -857,7 +841,6 @@ func TestManager_NewSelector_WithDifferentPrecisions(t *testing.T) {
 				LeaseCleanupTickPeriod: 0,
 				MaxTokensPerSelection:  10000,
 				MaxLockAttempts:        50000,
-				MaxRetryCycles:         10,
 				SelectionTimeout:       30 * time.Second,
 				Metrics:                NewMetrics(&disabled.Provider{}),
 			})

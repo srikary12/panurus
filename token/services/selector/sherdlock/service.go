@@ -45,7 +45,7 @@ func NewService(
 		leaseCleanupTickPeriod:       cfg.GetLeaseCleanupTickPeriod(),
 		maxTokensPerSelection:        cfg.GetMaxTokensPerSelection(),
 		maxLockAttempts:              cfg.GetMaxLockAttempts(),
-		maxRetryCycles:               cfg.GetMaxRetryCycles(),
+		maxLocksPerTx:                cfg.GetMaxLocksPerTransaction(),
 		selectionTimeout:             cfg.GetSelectionTimeout(),
 		metrics:                      NewMetrics(metricsProvider),
 		onCreate:                     svc.trackManager,
@@ -99,7 +99,7 @@ type loader struct {
 	leaseCleanupTickPeriod       time.Duration
 	maxTokensPerSelection        int
 	maxLockAttempts              int
-	maxRetryCycles               int
+	maxLocksPerTx                int
 	selectionTimeout             time.Duration
 	metrics                      *Metrics
 	onCreate                     func(*Manager)
@@ -125,7 +125,7 @@ func (s *loader) loadTMS(tms TMS) (token.SelectorManager, error) {
 
 	mgr := NewManager(&Config{
 		Fetcher:                fetcher,
-		Locker:                 tokenLockStoreService,
+		Locker:                 NewBoundedLocker(tokenLockStoreService, s.maxLocksPerTx),
 		Precision:              pp.Precision(),
 		Backoff:                s.retryInterval,
 		MaxRetriesAfterBackOff: s.numRetries,
@@ -133,7 +133,6 @@ func (s *loader) loadTMS(tms TMS) (token.SelectorManager, error) {
 		LeaseCleanupTickPeriod: s.leaseCleanupTickPeriod,
 		MaxTokensPerSelection:  s.maxTokensPerSelection,
 		MaxLockAttempts:        s.maxLockAttempts,
-		MaxRetryCycles:         s.maxRetryCycles,
 		SelectionTimeout:       s.selectionTimeout,
 		Metrics:                s.metrics,
 	})

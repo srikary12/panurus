@@ -39,7 +39,6 @@ func TestManager_Stop(t *testing.T) {
 			LeaseCleanupTickPeriod: 20 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -86,7 +85,6 @@ func TestManager_Stop(t *testing.T) {
 			LeaseCleanupTickPeriod: 20 * time.Millisecond,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})
@@ -112,7 +110,6 @@ func TestManager_Stop(t *testing.T) {
 			LeaseCleanupTickPeriod: time.Minute,
 			MaxTokensPerSelection:  10000,
 			MaxLockAttempts:        50000,
-			MaxRetryCycles:         10,
 			SelectionTimeout:       30 * time.Second,
 			Metrics:                NewMetrics(&disabled.Provider{}),
 		})

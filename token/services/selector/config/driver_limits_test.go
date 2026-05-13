@@ -64,17 +64,6 @@ func TestConfig_GetLimits(t *testing.T) {
 		assert.Equal(t, defaultSelectionTimeout, limits.SelectionTimeout)
 	})
 
-	t.Run("backward compatibility: uses deprecated MaxRetryCycles", func(t *testing.T) {
-		cfg := &Config{
-			Limits: Limits{
-				MaxRetryCycles: 7, // Deprecated field
-			},
-		}
-		limits := cfg.GetLimits()
-
-		assert.Equal(t, 7, limits.MaxRetries, "should use deprecated MaxRetryCycles value")
-	})
-
 	t.Run("backward compatibility: uses deprecated NumRetries", func(t *testing.T) {
 		cfg := &Config{
 			NumRetries: 8, // Deprecated field
@@ -84,17 +73,16 @@ func TestConfig_GetLimits(t *testing.T) {
 		assert.Equal(t, 8, limits.MaxRetries, "should use deprecated NumRetries value")
 	})
 
-	t.Run("backward compatibility: MaxRetries takes precedence", func(t *testing.T) {
+	t.Run("backward compatibility: MaxRetries takes precedence over NumRetries", func(t *testing.T) {
 		cfg := &Config{
 			NumRetries: 8,
 			Limits: Limits{
-				MaxRetries:     5,
-				MaxRetryCycles: 7,
+				MaxRetries: 5,
 			},
 		}
 		limits := cfg.GetLimits()
 
-		assert.Equal(t, 5, limits.MaxRetries, "MaxRetries should take precedence over deprecated fields")
+		assert.Equal(t, 5, limits.MaxRetries, "MaxRetries should take precedence over deprecated NumRetries")
 	})
 }
 
@@ -110,7 +98,7 @@ func TestConfig_Validate(t *testing.T) {
 			Limits: Limits{
 				MaxTokensPerSelection:  5000,
 				MaxLockAttempts:        25000,
-				MaxRetryCycles:         5,
+				MaxRetries:             5,
 				MaxLocksPerTransaction: 2500,
 				SelectionTimeout:       15 * time.Second,
 			},

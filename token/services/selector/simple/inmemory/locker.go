@@ -58,6 +58,12 @@ func (l lockEntry) String() string {
 type shard struct {
 	mu     sync.RWMutex
 	locked map[token2.ID]*lockEntry
+	// txLocks tracks the number of tokens locked per transaction ID.
+	// It is kept in sync with locked: incremented on every new lock write,
+	// decremented (and the key deleted when it reaches zero) on every delete.
+	// This gives O(1) per-transaction lock counting instead of a full scan.
+	// Guarded by mu.
+	txLocks map[string]int
 	// pruned reports whether this shard has been removed from the registry.
 	// A caller that obtained the shard before it was pruned must not write to
 	// it: the entry would be invisible to every other operation. Guarded by mu.
@@ -65,7 +71,24 @@ type shard struct {
 }
 
 func newShard() *shard {
-	return &shard{locked: map[token2.ID]*lockEntry{}}
+	return &shard{
+		locked:  map[token2.ID]*lockEntry{},
+		txLocks: map[string]int{},
+	}
+}
+
+// deleteLocked removes id from s.locked and decrements the txLocks counter for
+// the entry's transaction. The caller must hold s.mu (write lock).
+func (s *shard) deleteLocked(id token2.ID) {
+	e, ok := s.locked[id]
+	if !ok {
+		return
+	}
+	delete(s.locked, id)
+	s.txLocks[e.TxID]--
+	if s.txLocks[e.TxID] == 0 {
+		delete(s.txLocks, e.TxID)
+	}
 }
 
 type locker struct {
@@ -219,13 +242,7 @@ func (d *locker) lockInShard(ctx context.Context, s *shard, owner string, id *to
 	// selection locks tokens for one owner, so all of a transaction's locks
 	// live in this owner's shard and counting within it is per-transaction.
 	if d.maxLocksPerTx > 0 {
-		txLockCount := 0
-		for _, entry := range s.locked {
-			if entry.TxID == txID {
-				txLockCount++
-			}
-		}
-		if txLockCount >= d.maxLocksPerTx {
+		if txLockCount := s.txLocks[txID]; txLockCount >= d.maxLocksPerTx {
 			return "", errors.Errorf(
 				"lock limit exceeded: transaction %s already holds %d locks (max: %d)",
 				txID, txLockCount, d.maxLocksPerTx,
@@ -283,6 +300,7 @@ func (d *locker) lockInShard(ctx context.Context, s *shard, owner string, id *to
 	logger.DebugfContext(ctx, "locking [%s] for [%s] by owner [%s]", id, txID, owner)
 	now := time.Now()
 	s.locked[k] = &lockEntry{TxID: txID, Identity: owner, Created: now, LastAccess: now}
+	s.txLocks[txID]++
 
 	return "", nil
 }
@@ -306,7 +324,7 @@ func (d *locker) UnlockIDs(ctx context.Context, owner string, ids ...*token2.ID)
 			continue
 		}
 		logger.DebugfContext(ctx, "unlocking [%s] hold by [%s]", id, entry)
-		delete(s.locked, k)
+		s.deleteLocked(k)
 	}
 
 	d.pruneEmptyShard(owner, s)
@@ -349,7 +367,7 @@ func (d *locker) UnlockByTxID(ctx context.Context, txID string) {
 		for id, entry := range s.locked {
 			if entry.TxID == txID {
 				logger.DebugfContext(ctx, "unlocking [%s] hold by [%s]", id, entry)
-				delete(s.locked, id)
+				s.deleteLocked(id)
 			}
 		}
 		d.pruneEmptyShard(owner, s)
@@ -376,6 +394,24 @@ func (d *locker) IsLocked(id *token2.ID) bool {
 	}
 
 	return false
+}
+
+// reclaim checks the tx status for id inside shard s and deletes the entry
+// if the holding transaction is finalized (Deleted). The caller must hold
+// s.mu (write lock).
+func (d *locker) reclaim(ctx context.Context, s *shard, id *token2.ID, txID string) (bool, int) {
+	status, _, err := d.ttxdb.GetStatus(ctx, txID)
+	if err != nil {
+		return false, status
+	}
+	switch status {
+	case ttxdb.Deleted:
+		s.deleteLocked(*id)
+
+		return true, status
+	default:
+		return false, status
+	}
 }
 
 func (d *locker) start(ctx context.Context) {
@@ -477,7 +513,7 @@ func (d *locker) scan(ctx context.Context) {
 				// transaction, or a plain Lock may have refreshed its last
 				// access time; either way the entry must be kept.
 				if e, ok := s.locked[entry.id]; ok && e.TxID == entry.txID && e.LastAccess.Equal(entry.lastAccess) {
-					delete(s.locked, entry.id)
+					s.deleteLocked(entry.id)
 				}
 			}
 			d.pruneEmptyShard(owner, s)
