@@ -114,6 +114,15 @@ func (s *Service) RegisterRecipientIdentity(ctx context.Context, data *tdriver.R
 
 	s.Logger.DebugfContext(ctx, "register recipient identity [%s] with audit info [%s]", data.Identity, utils.Hashable(data.AuditInfo))
 
+	// Validate basic structure: nil/empty checks and length bounds as a DoS guard.
+	// Driver-specific validation (audit-info format, typed-identity structure, enrollment
+	// ID / revocation handle) is intentionally not performed here — it is technology-specific
+	// and is already covered downstream by MatchIdentity and the driver's own deserializers.
+	if err := validateBasicStructure(data); err != nil {
+		return errors.Wrap(err, "basic structure validation failed")
+	}
+
+	// Match identity against audit info (cryptographic binding) before any registration.
 	if err := s.Deserializer.MatchIdentity(ctx, data.Identity, data.AuditInfo); err != nil {
 		return errors.Wrapf(err, "failed to match identity to audit information for [%s]:[%s]", data.Identity, utils.Hashable(data.AuditInfo))
 	}
