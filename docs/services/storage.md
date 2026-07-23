@@ -341,3 +341,51 @@ The cleanup service supports both PostgreSQL and SQLite backends, with different
 Cleanup behavior is controlled by the configuration section. See the [Configuration Guide](../configuration.md) for detailed parameter descriptions and tuning recommendations.
 
 See the [Configuration Guide](../configuration.md), Section `Optional: token.tms.<name>.services.network.fabric.recovery`, for detailed parameter descriptions and tuning recommendations.
+
+## Storage API Limits
+
+The storage service limits its writes and reads so one huge write or one runaway
+query can't exhaust the database (issue #1630, CWE-400 / CWE-770). The limits are
+enforced by a single, stackable **guard** decorator layer
+(`token/services/storage/db/guard/`) applied once at the multiplexed driver
+(`token/services/storage/db/multiplexed/driver.go`) as each store is created, so
+every backing driver (SQLite, PostgreSQL) and every store is covered by the same
+mechanism. The decorators embed the store interfaces and override only the methods
+that need a check, delegating everything else — new layers (metrics, tracing) can be
+stacked the same way, with the concrete SQL store at the bottom.
+
+A single `Policy` (`MaxPayloadSize`, `MaxPageSize`) drives every check. It is loaded
+once from configuration; absent keys fall back to the built-in defaults, and an
+explicit `0` disables that check.
+
+**Write size limit.** Writes whose serialised payload exceeds `maxPayloadSize`
+(default 4 MiB; `0` disables) are rejected before reaching the database. Covered
+writes include the transaction store's `AddTokenRequest` / `AddTransaction` /
+`AddMovement` / `AddTransactionEndorsementAck`, the token store's `StoreToken` /
+`StorePublicParams` / `StoreCertifications`, the endorser store's
+`AddValidationRecord`, the identity store's `StoreIdentityData` / `StoreSignerInfo` /
+`RegisterIdentityDescriptor` / `AddConfiguration`, and the wallet store's
+`StoreIdentity`.
+
+**Read size limits.**
+- Paginated reads (`QueryTransactions`) require a bounded page: `nil` and
+  `pagination.None()` are rejected, and a page size larger than `maxPageSize`
+  (default 1000) is rejected. Callers page through the full result set.
+- Streaming iterator reads are capped at `maxPageSize` rows via a limiting iterator
+  that errors (rather than silently truncating) once the cap is exceeded. Covered
+  reads include the token store's unspent/spendable/unsupported iterators, the
+  endorser store's `QueryValidations`, the transaction store's `QueryTokenRequests`,
+  and the identity store's `IteratorConfigurations`.
+- `QueryMovements` is left uncapped on purpose: it feeds balance totals, and dropping
+  rows there would quietly return wrong balances. It is already narrowed by its
+  required filters.
+
+You can override the limits in configuration (`token.storage.maxPayloadSize` /
+`token.storage.maxPageSize`) — see the [Configuration Guide](../configuration.md).
+
+**Not yet covered (tracked follow-up).** Reads that materialise a full slice/map
+before returning (e.g. `ListUnspentTokens`, `QueryTokenDetails`,
+`ConfigurationsByID`, `GetWalletIDs`) cannot be bounded by a wrapper alone — the SQL
+has already loaded everything — so they need a SQL-level `LIMIT` or conversion to
+iterators. The opaque `Keystore.Put` value and input-size caps for variadic id lists
+(`DeleteTokens`, `GetTokens`) are in the same follow-up.
