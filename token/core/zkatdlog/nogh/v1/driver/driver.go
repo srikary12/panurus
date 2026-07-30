@@ -134,7 +134,7 @@ func (d *Driver) NewTokenService(tmsID driver.TMSID, publicParams []byte) (drive
 
 	metricsProvider := metrics.NewTMSProvider(tmsConfig.ID(), d.metricsProvider)
 	qe := vault.QueryEngine()
-	ws, err := d.NewWalletService(
+	ws, sigStack, err := d.newWalletService(
 		tmsConfig,
 		d.endpointService,
 		d.storageProvider,
@@ -213,6 +213,9 @@ func (d *Driver) NewTokenService(tmsID driver.TMSID, publicParams []byte) (drive
 	if err != nil {
 		return nil, errors.WithMessagef(err, "failed to create token service")
 	}
+	// The stack gates this service's client-facing signature service and is released when the
+	// service is done with.
+	service.SetSignatureInstrumentation(sigStack)
 
 	return service, err
 }

@@ -1,0 +1,533 @@
+/*
+Copyright IBM Corp. All Rights Reserved.
+
+SPDX-License-Identifier: Apache-2.0
+*/
+
+package throttle
+
+import (
+	"context"
+	"strconv"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/LFDT-Panurus/panurus/token"
+	"github.com/LFDT-Panurus/panurus/token/services/identity/sigobserve"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const alice = "alice-hash"
+
+// testClock is a manually advanced clock, so that block expiry and de-escalation can be asserted
+// without sleeping.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTestClock() *testClock {
+	return &testClock{now: time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)}
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.now
+}
+
+func (c *testClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// recorder collects the escalation events an Escalator reports.
+type recorder struct {
+	mu     sync.Mutex
+	events []sigobserve.Event
+}
+
+func (r *recorder) Observe(_ context.Context, e sigobserve.Event) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.events = append(r.events, e)
+}
+
+func (r *recorder) all() []sigobserve.Event {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return append([]sigobserve.Event(nil), r.events...)
+}
+
+// levels returns the (level, reason) pairs reported, in order.
+func (r *recorder) levels() [][2]string {
+	out := make([][2]string, 0, len(r.events))
+	for _, e := range r.all() {
+		out = append(out, [2]string{e.Level, e.Reason})
+	}
+
+	return out
+}
+
+func (r *recorder) last(t *testing.T) sigobserve.Event {
+	t.Helper()
+	events := r.all()
+	require.NotEmpty(t, events)
+
+	return events[len(events)-1]
+}
+
+// fakeGauge records the last count reported for each level.
+type fakeGauge struct {
+	mu     sync.Mutex
+	counts map[string]int
+}
+
+func newFakeGauge() *fakeGauge { return &fakeGauge{counts: map[string]int{}} }
+
+func (g *fakeGauge) SetThrottledPrincipals(level string, n int) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.counts[level] = n
+}
+
+func (g *fakeGauge) get(level string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.counts[level]
+}
+
+// newTestEscalator returns an Escalator driven by clock, with cfg already defaulted.
+func newTestEscalator(t *testing.T, cfg *Config, clock *testClock, opts ...Option) *Escalator {
+	t.Helper()
+	require.NoError(t, cfg.Defaults())
+
+	e := New(cfg, opts...)
+	t.Cleanup(e.Stop)
+	e.now = clock.Now
+
+	return e
+}
+
+// enforcing returns a configuration that denies, with the ratio triggers wide open so that only
+// what a test drives explicitly can escalate.
+func enforcing() *Config {
+	return &Config{
+		Mode:                          ModeEnforce,
+		Rate:                          1000,
+		Burst:                         1000,
+		MinSamples:                    2,
+		ErrorRateThreshold:            0.5,
+		InvalidSignatureRateThreshold: 0.5,
+		SoftDuration:                  time.Minute,
+		BlockDuration:                 time.Minute,
+		DeescalateAfter:               2 * time.Minute,
+	}
+}
+
+// observeInvalid reports n rejected verifications for principalID.
+func observeInvalid(t *testing.T, e *Escalator, principalID string, n int) {
+	t.Helper()
+	for range n {
+		e.Observe(t.Context(), sigobserve.Event{
+			Op:        sigobserve.OpVerify,
+			Principal: principalID,
+			Outcome:   sigobserve.OutcomeInvalid,
+		})
+	}
+}
+
+func TestEscalatorDisabled(t *testing.T) {
+	tests := []struct {
+		name   string
+		config *Config
+	}{
+		{name: "nil configuration"},
+		{name: "mode off", config: &Config{Mode: ModeOff, Rate: 1}},
+		{name: "non-positive rate", config: &Config{Mode: ModeEnforce, Rate: -1}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			r := &recorder{}
+			e := New(test.config, WithObserver(r))
+			t.Cleanup(e.Stop)
+
+			for range 100 {
+				require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpGetSigner))
+			}
+			observeInvalid(t, e, alice, 100)
+
+			assert.Equal(t, LevelNormal, e.Level(alice))
+			assert.Empty(t, r.all(), "a disabled policy reports nothing")
+			soft, blocked := e.Throttled()
+			assert.Zero(t, soft)
+			assert.Zero(t, blocked)
+		})
+	}
+}
+
+func TestEscalatorAllowsTrafficWithinQuota(t *testing.T) {
+	e := newTestEscalator(t, enforcing(), newTestClock())
+
+	for range 500 {
+		require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpGetSigner))
+	}
+	assert.Equal(t, LevelNormal, e.Level(alice))
+}
+
+func TestEscalatorNeverThrottlesAnUnattributedOperation(t *testing.T) {
+	cfg := enforcing()
+	cfg.Rate, cfg.Burst = 1, 1
+	e := newTestEscalator(t, cfg, newTestClock())
+
+	for range 50 {
+		require.NoError(t, e.Allow(t.Context(), "", sigobserve.OpGetSigner))
+	}
+	observeInvalid(t, e, "", 50)
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	assert.Empty(t, e.principals, "an unattributed operation must not create per-principal state")
+}
+
+func TestEscalatorQuotaExhaustionEscalates(t *testing.T) {
+	cfg := enforcing()
+	cfg.Rate, cfg.Burst = 1, 1
+	r := &recorder{}
+	e := newTestEscalator(t, cfg, newTestClock(), WithObserver(r))
+
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpGetSigner), "the first call spends the only token")
+
+	err := e.Allow(t.Context(), alice, sigobserve.OpGetSigner)
+	require.Error(t, err)
+	require.ErrorIs(t, err, token.SignatureThrottled, "callers must be able to tell a denial from a failure")
+	assert.Contains(t, err.Error(), "get_signer")
+	assert.Equal(t, LevelSoft, e.Level(alice))
+
+	event := r.last(t)
+	assert.Equal(t, sigobserve.OpEscalation, event.Op)
+	assert.Equal(t, alice, event.Principal)
+	assert.Equal(t, string(LevelSoft), event.Level)
+	assert.Equal(t, ReasonRate, event.Reason)
+	assert.Equal(t, sigobserve.OutcomeOK, event.Outcome)
+	assert.Zero(t, event.Duration, "an escalation is state, not a timed call")
+}
+
+func TestEscalatorMonitorModeEvaluatesButNeverDenies(t *testing.T) {
+	cfg := enforcing()
+	cfg.Mode = ModeMonitor
+	cfg.Rate, cfg.Burst = 1, 1
+	r := &recorder{}
+	e := newTestEscalator(t, cfg, newTestClock(), WithObserver(r))
+
+	for range 10 {
+		require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpGetSigner), "monitor mode must not deny")
+	}
+
+	assert.NotEqual(t, LevelNormal, e.Level(alice), "the decision is still evaluated")
+	assert.NotEmpty(t, r.all(), "and still reported, so thresholds can be tuned before enforcing")
+}
+
+func TestEscalatorInvalidSignatureRateEscalates(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 4
+	cfg.ErrorRateThreshold = 0.99
+	cfg.InvalidSignatureRateThreshold = 0.5
+	r := &recorder{}
+	e := newTestEscalator(t, cfg, newTestClock(), WithObserver(r))
+
+	// Two successes and two rejections: four samples, half of them invalid.
+	for range 2 {
+		e.Observe(t.Context(), sigobserve.Event{Op: sigobserve.OpVerify, Principal: alice, Outcome: sigobserve.OutcomeOK})
+	}
+	observeInvalid(t, e, alice, 1)
+	assert.Equal(t, LevelNormal, e.Level(alice), "one rejection in three samples is not an attack")
+
+	observeInvalid(t, e, alice, 1)
+	assert.Equal(t, LevelSoft, e.Level(alice))
+	assert.Equal(t, ReasonInvalidSignatureRate, r.last(t).Reason)
+}
+
+func TestEscalatorErrorRateEscalates(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 4
+	cfg.ErrorRateThreshold = 0.5
+	cfg.InvalidSignatureRateThreshold = 0.99
+	r := &recorder{}
+	e := newTestEscalator(t, cfg, newTestClock(), WithObserver(r))
+
+	for range 4 {
+		e.Observe(t.Context(), sigobserve.Event{Op: sigobserve.OpGetSigner, Principal: alice, Outcome: sigobserve.OutcomeError})
+	}
+
+	assert.Equal(t, LevelSoft, e.Level(alice))
+	assert.Equal(t, ReasonErrorRate, r.last(t).Reason)
+}
+
+func TestEscalatorMinSamplesGatesTheRatios(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 50
+	cfg.InvalidSignatureRateThreshold = 0.1
+	e := newTestEscalator(t, cfg, newTestClock())
+
+	observeInvalid(t, e, alice, 49)
+	assert.Equal(t, LevelNormal, e.Level(alice), "a ratio over too few samples is noise")
+
+	observeInvalid(t, e, alice, 1)
+	assert.Equal(t, LevelSoft, e.Level(alice))
+}
+
+func TestEscalatorIgnoresItsOwnEventsAndDenials(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 1
+	cfg.InvalidSignatureRateThreshold = 0.1
+	e := newTestEscalator(t, cfg, newTestClock())
+
+	// A self-referential observer chain must not recurse: escalation events are dropped.
+	for range 10 {
+		e.Observe(t.Context(), sigobserve.Event{
+			Op:        sigobserve.OpEscalation,
+			Principal: alice,
+			Outcome:   sigobserve.OutcomeError,
+			Level:     string(LevelSoft),
+		})
+	}
+	// A denied operation never ran, so it is not a sample either.
+	for range 10 {
+		e.Observe(t.Context(), sigobserve.Event{
+			Op:        sigobserve.OpGetSigner,
+			Principal: alice,
+			Outcome:   sigobserve.OutcomeThrottled,
+		})
+	}
+
+	assert.Equal(t, LevelNormal, e.Level(alice))
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	assert.Empty(t, e.principals)
+}
+
+func TestEscalatorSecondViolationBlocks(t *testing.T) {
+	clock := newTestClock()
+	r := &recorder{}
+	e := newTestEscalator(t, enforcing(), clock, WithObserver(r))
+
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice))
+
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelBlocked, e.Level(alice))
+
+	err := e.Allow(t.Context(), alice, sigobserve.OpSign)
+	require.ErrorIs(t, err, token.SignatureThrottled)
+	assert.Contains(t, err.Error(), "blocked until")
+	assert.Equal(t, [][2]string{
+		{string(LevelSoft), ReasonInvalidSignatureRate},
+		{string(LevelBlocked), ReasonInvalidSignatureRate},
+	}, r.levels())
+}
+
+func TestEscalatorBlockIsRearmedByAFreshViolation(t *testing.T) {
+	clock := newTestClock()
+	e := newTestEscalator(t, enforcing(), clock)
+
+	observeInvalid(t, e, alice, 2)
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelBlocked, e.Level(alice))
+
+	// Halfway through the block, a fresh violation restarts it.
+	clock.advance(30 * time.Second)
+	observeInvalid(t, e, alice, 2)
+
+	clock.advance(40 * time.Second)
+	require.ErrorIs(t, e.Allow(t.Context(), alice, sigobserve.OpSign), token.SignatureThrottled,
+		"the original block would have expired by now, the re-armed one has not")
+
+	clock.advance(30 * time.Second)
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+}
+
+func TestEscalatorReleasesABlockedPrincipalToSoft(t *testing.T) {
+	clock := newTestClock()
+	r := &recorder{}
+	e := newTestEscalator(t, enforcing(), clock, WithObserver(r))
+
+	observeInvalid(t, e, alice, 2)
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelBlocked, e.Level(alice))
+
+	clock.advance(61 * time.Second)
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+	assert.Equal(t, LevelSoft, e.Level(alice), "a released principal returns to a reduced quota, not to full")
+	assert.Equal(t, [2]string{string(LevelSoft), ReasonBlockExpired}, r.levels()[len(r.levels())-1])
+}
+
+func TestEscalatorDeescalatesAfterAQuietPeriod(t *testing.T) {
+	clock := newTestClock()
+	r := &recorder{}
+	e := newTestEscalator(t, enforcing(), clock, WithObserver(r))
+
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice))
+
+	// Within the minimum soft period, the level is held.
+	clock.advance(30 * time.Second)
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+	assert.Equal(t, LevelSoft, e.Level(alice))
+
+	// Past both the minimum soft period and the violation-free period, the quota is restored.
+	clock.advance(2 * time.Minute)
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+	assert.Equal(t, LevelNormal, e.Level(alice))
+	assert.Equal(t, [2]string{string(LevelNormal), ReasonQuietPeriod}, r.levels()[len(r.levels())-1])
+
+	soft, blocked := e.Throttled()
+	assert.Zero(t, soft)
+	assert.Zero(t, blocked)
+}
+
+// TestEscalatorSoftQuotaSlowsWithoutBlocking pins the invariant that a soft-limited principal can
+// still make progress: a reduced bucket too small to ever hold one token would be an unannounced
+// permanent block, and there would be no way back to normal.
+func TestEscalatorSoftQuotaSlowsWithoutBlocking(t *testing.T) {
+	cfg := enforcing()
+	cfg.Rate, cfg.Burst = 4, 4
+	cfg.QuotaReductionFactor = 0.1 // a reduced capacity of 0.4 tokens, rounded up to one
+	e := newTestEscalator(t, cfg, newTestClock())
+
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice))
+
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign), "a soft-limited principal is slowed, not stopped")
+}
+
+func TestEscalatorReportsThrottledCounts(t *testing.T) {
+	clock := newTestClock()
+	gauge := newFakeGauge()
+	e := newTestEscalator(t, enforcing(), clock, WithLevelGauge(gauge))
+
+	observeInvalid(t, e, alice, 2)
+	observeInvalid(t, e, "bob-hash", 2)
+	observeInvalid(t, e, "bob-hash", 2)
+
+	soft, blocked := e.Throttled()
+	assert.Equal(t, 1, soft)
+	assert.Equal(t, 1, blocked)
+	assert.Equal(t, 1, gauge.get(string(LevelSoft)))
+	assert.Equal(t, 1, gauge.get(string(LevelBlocked)))
+
+	// Restoring alice's quota takes her out of the counts again.
+	clock.advance(3 * time.Minute)
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+	soft, blocked = e.Throttled()
+	assert.Zero(t, soft)
+	assert.Equal(t, 1, blocked)
+	assert.Zero(t, gauge.get(string(LevelSoft)))
+}
+
+func TestEscalatorWindowSlidesOut(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 3
+	cfg.InvalidSignatureRateThreshold = 0.5
+	cfg.Window = time.Minute
+	clock := newTestClock()
+	e := newTestEscalator(t, cfg, clock)
+
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelNormal, e.Level(alice))
+
+	// A full window later the earlier failures no longer count.
+	clock.advance(2 * time.Minute)
+	observeInvalid(t, e, alice, 2)
+	assert.Equal(t, LevelNormal, e.Level(alice), "failures that aged out must not escalate")
+
+	observeInvalid(t, e, alice, 1)
+	assert.Equal(t, LevelSoft, e.Level(alice))
+}
+
+func TestEscalatorWindowSlidesBySlot(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 3
+	cfg.InvalidSignatureRateThreshold = 0.5
+	cfg.Window = time.Minute
+	clock := newTestClock()
+	e := newTestEscalator(t, cfg, clock)
+
+	// One failure per ten-second slot: the window holds them all until the first ages out.
+	for range 2 {
+		observeInvalid(t, e, alice, 1)
+		clock.advance(10 * time.Second)
+	}
+	require.Equal(t, LevelNormal, e.Level(alice))
+
+	observeInvalid(t, e, alice, 1)
+	assert.Equal(t, LevelSoft, e.Level(alice), "three failures within the window escalate")
+}
+
+func TestEscalatorEvictIdle(t *testing.T) {
+	cfg := enforcing()
+	cfg.IdleTTL = time.Minute
+	clock := newTestClock()
+	e := newTestEscalator(t, cfg, clock)
+
+	require.NoError(t, e.Allow(t.Context(), "idle-hash", sigobserve.OpSign))
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice))
+
+	clock.advance(2 * time.Minute)
+	e.evictIdle()
+
+	e.mu.Lock()
+	_, idleKept := e.principals["idle-hash"]
+	_, throttledKept := e.principals[alice]
+	e.mu.Unlock()
+
+	assert.False(t, idleKept, "an idle unthrottled principal costs memory for nothing")
+	assert.True(t, throttledKept, "a throttled principal's state is the only record that it is throttled")
+}
+
+func TestEscalatorStopIsIdempotent(t *testing.T) {
+	cfg := enforcing()
+	cfg.Rate, cfg.Burst = 1, 1
+	e := newTestEscalator(t, cfg, newTestClock())
+
+	e.Stop()
+	e.Stop()
+
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+	require.ErrorIs(t, e.Allow(t.Context(), alice, sigobserve.OpSign), token.SignatureThrottled,
+		"a stopped escalator keeps enforcing, it only stops reclaiming memory")
+}
+
+func TestEscalatorConcurrentUse(t *testing.T) {
+	cfg := enforcing()
+	cfg.MinSamples = 1
+	gauge := newFakeGauge()
+	e := newTestEscalator(t, cfg, newTestClock(), WithObserver(&recorder{}), WithLevelGauge(gauge))
+
+	ctx := t.Context()
+	var wg sync.WaitGroup
+	for i := range 8 {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			principalID := strconv.Itoa(i) + "-hash"
+			for range 200 {
+				_ = e.Allow(ctx, principalID, sigobserve.OpGetSigner)
+				_ = e.Allow(ctx, alice, sigobserve.OpSign)
+				e.Observe(ctx, sigobserve.Event{Op: sigobserve.OpVerify, Principal: principalID, Outcome: sigobserve.OutcomeInvalid})
+				e.Observe(ctx, sigobserve.Event{Op: sigobserve.OpSign, Principal: alice, Outcome: sigobserve.OutcomeOK})
+				e.Level(principalID)
+				e.Throttled()
+				e.evictIdle()
+			}
+		}(i)
+	}
+	wg.Wait()
+}
