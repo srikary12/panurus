@@ -37,6 +37,12 @@ If you are developing *using* Panurus or contributing *to* Panurus, check out th
 *   [Testing](development/testing.md)
 *   [Test & Benchmark Profiler](../cmd/profiler/README.md)
 
+## Security
+
+*   [**OpenSSF Security Baseline**](openssf/README.md): Which OpenSSF Baseline level Panurus targets, what is already satisfied, and what is still pending.
+*   [Selector Resource Limits](security/selector_resource_limits.md): Bounds enforced by the token selector.
+*   [Security Policy](../SECURITY.md): How to report a vulnerability.
+
 ## Evolution
 
 *   [**Evolution Summary (v0.4.0 -> Present)**](evolution_summary.md): A summary of how the functionalities provided by Panurus have evolved since tag v0.4.0 when it was still called `token-sdk`.
