@@ -115,10 +115,12 @@ func TestInsufficientTokensManyReplicas(t *testing.T, replicas []EnhancedManager
 	assert.NotEmpty(t, errs)
 	sum, err := replicas[0].TokenSum()
 	require.NoError(t, err)
-	// After insufficient token selections, some tokens should remain
-	// The test creates 100 CHF (50 tokens * 2 CHF each) and requests 240 CHF total
-	// Since there are insufficient tokens, some selections will fail and tokens will remain
-	assert.Positive(t, sum.Cmp(newToken(0)), "Expected remaining tokens after failed selections")
+	// 100 CHF is available (50 tokens x CHF2) against 120 CHF of demand, and
+	// change is stored back, so a selector that never gives up while funds are
+	// reachable drains the wallet down to the CHF1 that no CHF3 request can
+	// use. Asserting only "something is left" would also pass when selections
+	// abandon funds they could have taken.
+	assert.Equal(t, 0, sum.Cmp(newToken(1)), "expected exactly CHF1 to remain, got %s", sum.Decimal())
 }
 
 // Enhanced manager

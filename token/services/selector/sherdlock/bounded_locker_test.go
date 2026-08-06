@@ -14,6 +14,7 @@ import (
 	"github.com/LFDT-Panurus/panurus/token"
 	"github.com/LFDT-Panurus/panurus/token/services/selector/sherdlock"
 	"github.com/LFDT-Panurus/panurus/token/services/selector/sherdlock/mocks"
+	"github.com/LFDT-Panurus/panurus/token/services/utils/types/transaction"
 	token2 "github.com/LFDT-Panurus/panurus/token/token"
 	"github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors"
 	"github.com/stretchr/testify/assert"
@@ -107,7 +108,19 @@ func TestBoundedLocker_UnlockByTxID_ResetsCounter(t *testing.T) {
 	require.NoError(t, bl.Lock(ctx, tokenID("tx1", 1), "consumer1", "wallet1"))
 }
 
-func TestBoundedLocker_Cleanup_ResetsAllCounters(t *testing.T) {
+// txScopedState mirrors the unexported interface Manager uses to drive
+// replica-local per-transaction bookkeeping on the locker.
+type txScopedState interface {
+	ForgetTx(txID transaction.ID)
+	EvictStaleTxState(olderThan time.Duration)
+}
+
+// TestBoundedLocker_Cleanup_KeepsLiveCounters pins that Cleanup does not reset
+// the per-transaction counters. Wiping them would make the ceiling "per
+// transaction per cleanup tick": an in-flight transaction already holding its
+// full quota would be handed a fresh budget on the next tick (one minute by
+// default) and could acquire maxLocksPerTx more, without bound.
+func TestBoundedLocker_Cleanup_KeepsLiveCounters(t *testing.T) {
 	inner := newFakeLocker()
 	bl := sherdlock.NewBoundedLocker(inner, 1)
 
@@ -118,9 +131,56 @@ func TestBoundedLocker_Cleanup_ResetsAllCounters(t *testing.T) {
 	require.True(t, errors.Is(err, token.SelectorRateLimited))
 
 	require.NoError(t, bl.Cleanup(ctx, time.Minute))
-	assert.Equal(t, 1, inner.CleanupCallCount())
+	assert.Equal(t, 1, inner.CleanupCallCount(), "Cleanup must still reach the inner locker")
 
-	// counter cleared — can lock again
+	// The transaction is still holding its quota, so the ceiling still binds.
+	err = bl.Lock(ctx, tokenID("tx1", 1), "consumer1", "wallet1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, token.SelectorRateLimited),
+		"ceiling must survive a cleanup tick, got: %v", err)
+}
+
+// TestBoundedLocker_EvictStaleTxState verifies the backstop that reclaims
+// counters for transactions that were never closed: entries idle longer than
+// the lease window go away, recent ones stay.
+func TestBoundedLocker_EvictStaleTxState(t *testing.T) {
+	inner := newFakeLocker()
+	bl := sherdlock.NewBoundedLocker(inner, 1)
+	state, ok := bl.(txScopedState)
+	require.True(t, ok, "boundedLocker must expose per-transaction state to Manager")
+
+	ctx := t.Context()
+	require.NoError(t, bl.Lock(ctx, tokenID("tx1", 0), "consumer1", "wallet1"))
+
+	// A recent reservation is not stale, so the ceiling still binds.
+	state.EvictStaleTxState(time.Minute)
+	err := bl.Lock(ctx, tokenID("tx1", 1), "consumer1", "wallet1")
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, token.SelectorRateLimited))
+
+	// With a zero window every existing entry is past its cutoff and is
+	// reclaimed, so the id starts over with a full budget.
+	state.EvictStaleTxState(0)
+	require.NoError(t, bl.Lock(ctx, tokenID("tx1", 1), "consumer1", "wallet1"))
+}
+
+// TestBoundedLocker_ForgetTx verifies the counter is released when a selector is
+// closed, without unlocking the tokens: after a successful selection the
+// transaction still needs its locks, but nothing else would reclaim the counter
+// on a replica that never wins cleanup leadership.
+func TestBoundedLocker_ForgetTx(t *testing.T) {
+	inner := newFakeLocker()
+	bl := sherdlock.NewBoundedLocker(inner, 1)
+	state, ok := bl.(txScopedState)
+	require.True(t, ok)
+
+	ctx := t.Context()
+	require.NoError(t, bl.Lock(ctx, tokenID("tx1", 0), "consumer1", "wallet1"))
+	require.Error(t, bl.Lock(ctx, tokenID("tx1", 1), "consumer1", "wallet1"))
+
+	state.ForgetTx("consumer1")
+
+	assert.Zero(t, inner.UnlockByTxIDCallCount(), "ForgetTx must not release the tokens")
 	require.NoError(t, bl.Lock(ctx, tokenID("tx1", 1), "consumer1", "wallet1"))
 }
 

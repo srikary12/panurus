@@ -55,6 +55,13 @@ type selector struct {
 	// Resource tracking counters (reset per selection)
 	tokensIteratedCount int
 	lockAttemptsCount   int
+
+	// tokensIteratedThisCycle counts the tokens examined in the current retry
+	// cycle only. The DB already caps each cycle at maxTokensPerSelection, so
+	// the per-cycle count is what the limit and the "we have seen everything"
+	// check must compare against; tokensIteratedCount stays cumulative and is
+	// only reported in error messages.
+	tokensIteratedThisCycle int
 }
 
 // Select selects tokens to be spent based on ownership, quantity, and type
@@ -66,9 +73,10 @@ func (s *selector) Select(ctx context.Context, ownerFilter token.OwnerFilter, q 
 	// Reset resource tracking counters for this selection
 	s.tokensIteratedCount = 0
 	s.lockAttemptsCount = 0
+	s.tokensIteratedThisCycle = 0
 
 	// Create timeout context if configured
-	timeoutCtx, cancel := context.WithTimeout(ctx, s.selectionTimeout)
+	timeoutCtx, cancel := withSelectionTimeout(ctx, s.selectionTimeout)
 	defer cancel()
 
 	// Use timeout context for selection
@@ -79,7 +87,10 @@ func (s *selector) Select(ctx context.Context, ownerFilter token.OwnerFilter, q 
 		// Use original context for cleanup to ensure it completes
 		s.locker.UnlockByTxID(ctx, s.txID)
 
-		return nil, nil, errors.Errorf(
+		// Wrap the sentinel so callers can tell a timeout apart from a
+		// genuine failure, as sherdlock's selector already does.
+		return nil, nil, errors.WithMessagef(
+			token.SelectorTimedOut,
 			"token selection aborted: exceeded timeout (%v) after examining %d tokens and %d lock attempts",
 			s.selectionTimeout, s.tokensIteratedCount, s.lockAttemptsCount,
 		)
@@ -136,6 +147,10 @@ func (s *selector) selectByID(ctx context.Context, ownerFilter token.OwnerFilter
 		}
 		logger.DebugfContext(ctx, "select token for a quantity of [%s] of type [%s]", q, tokenType)
 
+		// The query above is capped at maxTokensPerSelection rows, so the
+		// iteration budget is per cycle, not for the whole selection.
+		s.tokensIteratedThisCycle = 0
+
 		// First select only certified
 		sum = token2.NewZeroQuantity(s.precision)
 		potentialSumWithLocked = token2.NewZeroQuantity(s.precision)
@@ -154,7 +169,8 @@ func (s *selector) selectByID(ctx context.Context, ownerFilter token.OwnerFilter
 
 			// Check token iteration limit (only count actual tokens, not nil)
 			s.tokensIteratedCount++
-			if s.tokensIteratedCount > s.maxTokensPerSelection {
+			s.tokensIteratedThisCycle++
+			if s.tokensIteratedThisCycle > s.maxTokensPerSelection {
 				s.locker.UnlockIDs(ctx, id, toBeSpent...)
 				s.locker.UnlockIDs(ctx, id, toBeCertified...)
 
@@ -248,10 +264,28 @@ func (s *selector) selectByID(ctx context.Context, ownerFilter token.OwnerFilter
 		if target.Cmp(potentialSumWithLocked) <= 0 && potentialSumWithLocked.Cmp(sum) != 0 {
 			// funds are potentially enough but they are locked
 			logger.DebugfContext(ctx, "token selection: sufficient funds but partially locked")
-		} else if target.Cmp(potentialSumWithLocked) > 0 && s.tokensIteratedCount < s.maxTokensPerSelection {
-			// Insufficient funds with no locked tokens AND we haven't hit iteration limits
-			// This means we've examined all available tokens - fail immediately without retrying
-			// This prevents unnecessary retries and timeout when funds are clearly insufficient
+		} else if target.Cmp(potentialSumWithLocked) > 0 {
+			// Insufficient funds with no locked tokens. Whether that is the
+			// final answer depends on how much of the wallet this cycle got to
+			// see, which is decided per cycle: the query is capped at
+			// maxTokensPerSelection rows, and the cumulative counter grows past
+			// that cap across cycles even when every cycle saw the full set.
+			if s.tokensIteratedThisCycle >= s.maxTokensPerSelection {
+				// A full page came back, so the wallet holds more tokens than
+				// this selection is allowed to examine. The query is ordered
+				// deterministically, so a retry re-reads the same page: report
+				// the limit as the reason rather than spinning on it.
+				logger.DebugfContext(ctx, "token selection: iteration limit reached with a full page of tokens")
+
+				return nil, nil, errors.Errorf(
+					"token selection aborted: exceeded max token iteration limit (%d tokens)",
+					s.maxTokensPerSelection,
+				)
+			}
+
+			// A short page means the iterator surfaced every token the wallet
+			// has, so the funds really are insufficient. Fail immediately
+			// instead of retrying until the timeout.
 			logger.DebugfContext(ctx, "token selection: insufficient funds, no tokens locked, failing immediately")
 
 			return nil, nil, errors.WithMessagef(
@@ -305,6 +339,19 @@ func (s *selector) selectByID(ctx context.Context, ownerFilter token.OwnerFilter
 		logger.DebugfContext(ctx, "token selection: let's wait [%v] before retry...", backoff)
 		time.Sleep(backoff)
 	}
+}
+
+// withSelectionTimeout bounds ctx by the configured selection timeout.
+//
+// A non-positive timeout means "no timeout": passing it straight to
+// context.WithTimeout yields an already-expired context, so every Select would
+// abort after examining zero tokens.
+func withSelectionTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, timeout)
 }
 
 // retryBackoff returns a random duration in [0, timeout), so transactions

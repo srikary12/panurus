@@ -58,12 +58,16 @@ type Config struct {
 	NumRetries int `yaml:"numRetries,omitempty"`
 }
 
-// New returns a SelectorConfig with the values from the token.selector key
+// New returns a SelectorConfig with the values from the token.selector key.
+//
+// On error the returned *Config is a usable zero value rather than nil, so the
+// callers that log the error and carry on with defaults do not dereference nil.
+// A partially unmarshalled struct is discarded: half-applied values are worse
+// than defaults.
 func New(config configService) (*Config, error) {
 	c := &Config{}
-	err := config.UnmarshalKey("token.selector", c)
-	if err != nil {
-		return nil, errors.Wrap(err, "invalid config for key [token.selector]: expected retryInterval (duration) and numRetries (integer))")
+	if err := config.UnmarshalKey("token.selector", c); err != nil {
+		return &Config{}, errors.Wrap(err, "invalid config for key [token.selector]: expected retryInterval (duration) and numRetries (integer))")
 	}
 
 	return c, nil
@@ -152,6 +156,18 @@ func (c *Config) GetLimits() Limits {
 	}
 	if limits.SelectionTimeout <= 0 {
 		limits.SelectionTimeout = defaultSelectionTimeout
+
+		// Keep the default wall-clock timeout from binding before the retry
+		// budget it is meant to bound. Both selectors sleep for up to
+		// retryInterval between cycles, so a contended selection can spend
+		// maxRetries * retryInterval backing off before it has used up its
+		// retries. With the defaults (10 retries, 5s interval) that averages
+		// ~25s and reaches 50s, so a fixed 30s ceiling would turn ordinary
+		// contention into SelectorTimedOut — which callers cannot resolve by
+		// retrying — instead of letting the retry budget play out.
+		if budget := time.Duration(limits.MaxRetries)*c.GetRetryInterval() + defaultSelectionTimeout; budget > limits.SelectionTimeout {
+			limits.SelectionTimeout = budget
+		}
 	}
 
 	return limits

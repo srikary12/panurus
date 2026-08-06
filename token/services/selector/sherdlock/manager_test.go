@@ -52,14 +52,14 @@ func TestSufficientTokensBigDenominationsOneReplica(t *testing.T) {
 }
 
 func TestSufficientTokensBigDenominationsManyReplicas(t *testing.T) {
-	// The retry budget has to absorb contention, not decide the result. 300 goroutines
-	// (3 replicas x 100 requests) contend for only 2 tokens, so the herd drains slowly and
-	// unlucky goroutines must retry many times before they win a lock. The single replica
-	// variant above already needs 20 retries with no competition at all, so 10 across three
-	// replicas was far too tight: a goroutine exhausted its retries and aborted with
-	// "insufficient funds" even though funds were available, making the outcome depend on
-	// scheduling. Give a generous backoff-retry budget. See #2121.
-	replicas, terminate := startManagers(t, 3, 2*time.Second, 60)
+	// The retry budget has to absorb contention, not decide the result. 300
+	// goroutines (3 replicas x 100 requests) contend for only 2 tokens, so the
+	// herd drains slowly and unlucky goroutines retry before they win a lock.
+	// The budget can stay at the pre-existing 10 as long as each selection
+	// releases its partial locks before backing off; if that release is dropped,
+	// goroutines sit on each other's funds and this test starts reporting
+	// "insufficient funds" with funds available. See #2121.
+	replicas, terminate := startManagers(t, 3, 2*time.Second, 10)
 	defer terminate()
 	testutils.TestSufficientTokensBigDenominationsManyReplicas(t, replicas)
 }

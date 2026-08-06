@@ -25,6 +25,19 @@ const (
 
 var ErrTimeout = errors.New("timeout occurred")
 
+// txScopedState is implemented by Lockers that keep replica-local
+// per-transaction bookkeeping alongside the shared lock store — currently
+// boundedLocker's per-transaction lock counters. Because the state is local, it
+// cannot be reclaimed by the shared Cleanup path (which only one replica runs);
+// Manager drives its lifecycle explicitly instead.
+type txScopedState interface {
+	// ForgetTx drops the state for a transaction that is done with selection.
+	ForgetTx(txID transaction.ID)
+	// EvictStaleTxState drops state whose transaction has been idle longer
+	// than olderThan, as a backstop for selectors that are never closed.
+	EvictStaleTxState(olderThan time.Duration)
+}
+
 // Config holds all configuration parameters for the Manager
 type Config struct {
 	Fetcher                TokenFetcher
@@ -82,6 +95,13 @@ func (m *Manager) Unlock(ctx context.Context, id transaction.ID) error {
 }
 
 func (m *Manager) Close(id transaction.ID) error {
+	// Release replica-local per-transaction bookkeeping. The locks themselves
+	// must stay: after a successful selection the transaction still needs them,
+	// and they are released by Unlock/UnlockByTxID or by lease expiry.
+	if s, ok := m.locker.(txScopedState); ok {
+		s.ForgetTx(id)
+	}
+
 	if c, ok := m.selectorCache.Delete(id); ok {
 		return c.Close()
 	}
@@ -109,6 +129,13 @@ func (m *Manager) cleaner(ctx context.Context) {
 // runCleanupTick acquires cleanup leadership for this tick so only one
 // replica runs Cleanup at a time; other replicas skip the tick. See #1798.
 func (m *Manager) runCleanupTick(ctx context.Context) {
+	// Evict stale replica-local state first, unconditionally: it belongs to
+	// this process, so gating it behind cleanup leadership would let it grow
+	// without bound on every replica that never wins the lease.
+	if s, ok := m.locker.(txScopedState); ok {
+		s.EvictStaleTxState(m.leaseExpiry)
+	}
+
 	leadership, acquired, err := m.locker.AcquireCleanupLeadership(ctx)
 	if err != nil {
 		logger.Errorf("failed to acquire cleanup leadership: [%s]", err)

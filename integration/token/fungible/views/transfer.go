@@ -290,7 +290,10 @@ func (t *TransferWithSelectorView) Call(context view.Context) (any, error) {
 			if err != nil && t.Retry &&
 				(errors.HasCause(err, token2.SelectorSufficientButLockedFunds) ||
 					errors.HasCause(err, token2.SelectorSufficientButNotCertifiedFunds) ||
-					errors.HasCause(err, token2.SelectorSufficientFundsButConcurrencyIssue)) {
+					errors.HasCause(err, token2.SelectorSufficientFundsButConcurrencyIssue) ||
+					// A selection that ran out of wall-clock time under
+					// contention is transient in exactly the same way.
+					errors.HasCause(err, token2.SelectorTimedOut)) {
 				time.Sleep(10 * time.Second)
 
 				continue
@@ -309,6 +312,8 @@ func (t *TransferWithSelectorView) Call(context view.Context) (any, error) {
 				assert.NoError(err, "mandarin")
 			case errors.HasCause(err, token2.SelectorSufficientFundsButConcurrencyIssue):
 				assert.NoError(err, "peach")
+			case errors.HasCause(err, token2.SelectorTimedOut):
+				assert.NoError(err, "papaya")
 			default:
 				assert.NoError(err, "system failure")
 			}

@@ -23,7 +23,12 @@ func TestConfig_GetLimits(t *testing.T) {
 		assert.Equal(t, defaultMaxLockAttempts, limits.MaxLockAttempts)
 		assert.Equal(t, defaultMaxRetries, limits.MaxRetries)
 		assert.Equal(t, defaultMaxLocksPerTransaction, limits.MaxLocksPerTransaction)
-		assert.Equal(t, defaultSelectionTimeout, limits.SelectionTimeout)
+		// The default timeout is widened to clear the default retry budget
+		// (maxRetries backoffs of up to retryInterval each), so that ordinary
+		// contention plays out through the retries instead of tripping
+		// SelectorTimedOut.
+		assert.Equal(t, defaultTimeoutFor(defaultMaxRetries, defaultRetryInterval), limits.SelectionTimeout)
+		assert.Greater(t, limits.SelectionTimeout, time.Duration(defaultMaxRetries)*defaultRetryInterval)
 	})
 
 	t.Run("returns configured values when set", func(t *testing.T) {
@@ -61,7 +66,7 @@ func TestConfig_GetLimits(t *testing.T) {
 		assert.Equal(t, defaultMaxLockAttempts, limits.MaxLockAttempts)
 		assert.Equal(t, defaultMaxRetries, limits.MaxRetries)
 		assert.Equal(t, defaultMaxLocksPerTransaction, limits.MaxLocksPerTransaction)
-		assert.Equal(t, defaultSelectionTimeout, limits.SelectionTimeout)
+		assert.Equal(t, defaultTimeoutFor(defaultMaxRetries, defaultRetryInterval), limits.SelectionTimeout)
 	})
 
 	t.Run("backward compatibility: uses deprecated NumRetries", func(t *testing.T) {
@@ -185,4 +190,10 @@ func TestConfig_DefaultValues(t *testing.T) {
 		assert.LessOrEqual(t, defaultMaxLocksPerTransaction, defaultMaxTokensPerSelection,
 			"maxLocksPerTransaction should be <= maxTokensPerSelection")
 	})
+}
+
+// defaultTimeoutFor mirrors the derivation in GetLimits: the fixed default plus
+// the worst-case time the selector may spend backing off between retries.
+func defaultTimeoutFor(maxRetries int, retryInterval time.Duration) time.Duration {
+	return time.Duration(maxRetries)*retryInterval + defaultSelectionTimeout
 }

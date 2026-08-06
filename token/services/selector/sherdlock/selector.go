@@ -67,7 +67,7 @@ func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFi
 	start := time.Now()
 
 	// Create timeout context if configured
-	timeoutCtx, cancel := context.WithTimeout(ctx, m.selectionTimeout)
+	timeoutCtx, cancel := withSelectionTimeout(ctx, m.selectionTimeout)
 	defer cancel()
 
 	var tokensIterated, lockAttempts int
@@ -110,6 +110,17 @@ func (m *StubbornSelector) Select(ctx context.Context, ownerFilter token.OwnerFi
 		} else {
 			tokensIterated += ti
 			lockAttempts += la
+
+			// Release the tokens we did manage to lock before backing off.
+			// The whole point of the backoff is to let a competing selection
+			// complete, which it cannot do while we sit on part of the funds:
+			// two selections that each hold a subset would both spin until
+			// their retry budget is exhausted and both report insufficient
+			// funds, with the funds available the entire time (the livelock
+			// described in the maxImmediateRetries comment above).
+			if unlockErr := m.locker.UnlockAll(ctx); unlockErr != nil {
+				m.logger.Errorf("failed to unlock tokens before backoff: %s", unlockErr)
+			}
 		}
 		var backoffDuration time.Duration
 		if m.backoffInterval > 0 {
@@ -175,15 +186,10 @@ func NewSelector(logger logging.Logger, tokenDB TokenFetcher, lockDB TokenLocker
 }
 
 func (s *Selector) Select(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, error) {
-	// Hold selectMu for the duration of the selection so that Close() waits
-	// for in-flight iterations to complete before calling cache.Close().
-	s.selectMu.RLock()
-	defer s.selectMu.RUnlock()
-
 	start := time.Now()
 
 	// Create timeout context if configured
-	timeoutCtx, cancel := context.WithTimeout(ctx, s.selectionTimeout)
+	timeoutCtx, cancel := withSelectionTimeout(ctx, s.selectionTimeout)
 	defer cancel()
 
 	ids, quantity, immediateRetries, tokensIterated, lockAttempts, err := s.selectInternal(timeoutCtx, owner, q, tokenType)
@@ -234,6 +240,20 @@ func (s *Selector) selectWithoutMetrics(ctx context.Context, owner token.OwnerFi
 }
 
 func (s *Selector) selectInternal(ctx context.Context, owner token.OwnerFilter, q string, tokenType token2.Type) ([]*token2.ID, token2.Quantity, int, int, int, error) {
+	// Hold the read side of selectMu for the duration of the iteration so that
+	// Close() (which takes the write side) waits for in-flight iterations
+	// instead of calling cache.Close() while cache.Next() is reading from
+	// sql.Rows.
+	//
+	// This has to live here rather than in Selector.Select: StubbornSelector
+	// overrides Select and reaches selectInternal via selectWithoutMetrics
+	// without ever going through Selector.Select, and NewSherdSelector returns
+	// a StubbornSelector for any backoff >= 0 — the default production path.
+	// Guarding here also keeps the lock off the backoff sleeps, so Close() is
+	// not blocked for the whole retry budget.
+	s.selectMu.RLock()
+	defer s.selectMu.RUnlock()
+
 	// Take mu to snapshot s.cache into a local variable, then release the lock
 	// and work exclusively through the local copy. This eliminates the data race
 	// between selectInternal reads of s.cache and a concurrent Close() write.
@@ -357,6 +377,21 @@ func (s *Selector) swapCache(it Iterator[*token2.UnspentTokenInWallet]) error {
 	s.cache = it
 
 	return nil
+}
+
+// withSelectionTimeout bounds ctx by the configured selection timeout.
+//
+// A non-positive timeout means "no timeout": passing it straight to
+// context.WithTimeout yields an already-expired context, so every Select would
+// return SelectorTimedOut after examining zero tokens. Manager takes its
+// limits from a Config struct, which makes an omitted SelectionTimeout easy to
+// miss, so the zero value has to be harmless.
+func withSelectionTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if timeout <= 0 {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (s *Selector) Close() error {

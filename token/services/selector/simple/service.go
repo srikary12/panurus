@@ -47,9 +47,13 @@ func NewService(lockerProvider LockerProvider, c ConfigProvider) *SelectorServic
 		logger.Errorf("error getting selector config, using defaults. %s", err.Error())
 	}
 
-	// Validate configuration
+	// Validate configuration. A rejected configuration must actually fall back
+	// to defaults: applying the values we just reported as invalid is worse
+	// than ignoring them (e.g. maxLockAttempts below maxTokensPerSelection
+	// aborts every selection partway through).
 	if err := cfg.Validate(); err != nil {
 		logger.Errorf("invalid selector configuration: %s, using defaults", err.Error())
+		cfg = &config.Config{}
 	}
 
 	limits := cfg.GetLimits()

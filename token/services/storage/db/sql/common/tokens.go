@@ -234,15 +234,27 @@ func unspentTokenFields(tokenTable, ownershipTable common3.Table) []common3.Fiel
 // connection from the pool, which avoids the deadlock that would arise if
 // two concurrent QueryContexts each tried to acquire a second connection.
 // PostgreSQL 9.6+ may also execute the branches in parallel via parallel
-// append. UNION ALL is used (not UNION) to skip the per-row sort/hash
-// dedup pass; duplicates between the two branches (and within branch 1 when
-// a token has multiple ownership rows) are filtered at the iterator layer.
+// append. On the unlimited path UNION ALL is used (not UNION) to skip the
+// per-row sort/hash dedup pass; duplicates between the two branches (and
+// within branch 1 when a token has multiple ownership rows) are filtered at
+// the iterator layer. The limited path must use UNION instead, so that LIMIT
+// counts distinct rows — see buildUnspentTokensIteratorByQuery.
 // buildUnspentTokensIteratorByQuery builds the SQL query and args for
 // UnspentTokensIteratorBy without executing it. Extracted so benchmarks can
 // compare executing this exact query dynamically (query built and run fresh
 // each call, the production path) against running it via a statement
 // prepared once ahead of time, using identical SQL in both cases.
-func buildUnspentTokensIteratorByQuery(db *TokenStore, walletID string, tokenType token.Type) (string, []any) {
+//
+// A limit > 0 appends ORDER BY amount DESC LIMIT <param> to the whole compound
+// SELECT and switches the set operator from UNION ALL to UNION, so that the
+// limit counts *distinct* rows. Leaving UNION ALL here would make the limit
+// count pre-dedup rows: a directly-owned token matches both branches, so
+// dedupedTokenRowsIterator would collapse them and surface only about half of
+// the requested rows, which the selector reads as "no more tokens available".
+// The limit placeholder is written through the shared builder so it is emitted
+// in the same dialect ($N) as every other parameter; a literal "?" here is a
+// syntax error on PostgreSQL.
+func buildUnspentTokensIteratorByQuery(db *TokenStore, walletID string, tokenType token.Type, limit int) (string, []any) {
 	tokenTable := q.Table(db.table.Tokens)
 	ownershipTable := q.Table(db.table.Ownership)
 	joinCond := cond.And(
@@ -293,8 +305,18 @@ func buildUnspentTokensIteratorByQuery(db *TokenStore, walletID string, tokenTyp
 	// entire UNION result set.
 	sb := common3.NewBuilder()
 	branch1.FormatTo(db.ci, sb)
-	sb.WriteString(" UNION ALL ")
+	if limit > 0 {
+		sb.WriteString(" UNION ")
+	} else {
+		sb.WriteString(" UNION ALL ")
+	}
 	branch2.FormatTo(db.ci, sb)
+	if limit > 0 {
+		// Order by amount descending: largest tokens first so the selector
+		// reaches the target amount with the fewest rows.
+		sb.WriteString(" ORDER BY amount DESC LIMIT ")
+		sb.WriteParam(limit)
+	}
 
 	return sb.Build()
 }
@@ -329,11 +351,7 @@ func (db *TokenStore) UnspentTokensIteratorBy(ctx context.Context, walletID stri
 	// limit-specific statement that would be returned for a future no-limit
 	// call of the same argument shape.
 	if limit > 0 {
-		query, args := buildUnspentTokensIteratorByQuery(db, walletID, tokenType)
-		// Order by amount descending: largest tokens first so the selector
-		// reaches the target amount with the fewest rows.
-		query += " ORDER BY amount DESC LIMIT ?"
-		args = append(args, limit)
+		query, args := buildUnspentTokensIteratorByQuery(db, walletID, tokenType, limit)
 		logging.Debug(logger, query, args)
 		//nolint:rowserrcheck // rows.Err is checked by dedupedTokenRowsIterator.Next, which owns rows from here on
 		rows, err := db.readDB.QueryContext(ctx, query, args...)
@@ -350,7 +368,7 @@ func (db *TokenStore) UnspentTokensIteratorBy(ctx context.Context, walletID stri
 	key := unspentTokensStmtKey(walletID, tokenType)
 	//nolint:rowserrcheck // rows.Err is checked by dedupedTokenRowsIterator.Next, which owns rows from here on
 	rows, err := db.unspentTokensStmts.Execute(ctx, db.readDB, key, func() (string, []any, error) {
-		query, args := buildUnspentTokensIteratorByQuery(db, walletID, tokenType)
+		query, args := buildUnspentTokensIteratorByQuery(db, walletID, tokenType, 0)
 
 		return query, args, nil
 	})

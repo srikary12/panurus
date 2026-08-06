@@ -24,7 +24,23 @@ import (
 type boundedLocker struct {
 	Locker
 	maxLocksPerTx int
-	counts        sync.Map // transaction.ID -> *atomic.Int64
+	counts        sync.Map // transaction.ID -> *txLockCounter
+}
+
+// txLockCounter tracks how many locks a transaction currently holds, together
+// with when it last took one. The timestamp lets stale entries be evicted by
+// age instead of wiping every counter, which would hand an in-flight
+// transaction a fresh budget.
+type txLockCounter struct {
+	count atomic.Int64
+	// lastLock is the UnixNano of the most recent reservation.
+	lastLock atomic.Int64
+}
+
+func (c *txLockCounter) touch(now time.Time) { c.lastLock.Store(now.UnixNano()) }
+
+func (c *txLockCounter) staleAt(cutoff time.Time) bool {
+	return c.lastLock.Load() < cutoff.UnixNano()
 }
 
 // NewBoundedLocker returns a Locker that rejects Lock calls for a given
@@ -45,19 +61,20 @@ func (b *boundedLocker) Lock(ctx context.Context, tokenID *token2.ID, consumerTx
 	// another goroutine incremented between our Load and Add; retry until the
 	// slot is ours or we are over the limit.
 	for {
-		current := c.Load()
+		current := c.count.Load()
 		if current >= limit {
 			return errors.Wrapf(token.SelectorRateLimited,
 				"lock limit exceeded: transaction %s already holds %d locks (max: %d)",
 				consumerTxID, current, b.maxLocksPerTx)
 		}
-		if c.CompareAndSwap(current, current+1) {
+		if c.count.CompareAndSwap(current, current+1) {
 			break
 		}
 	}
+	c.touch(time.Now())
 	if err := b.Locker.Lock(ctx, tokenID, consumerTxID, walletID); err != nil {
 		// Roll back the reservation on failure.
-		c.Add(-1)
+		c.count.Add(-1)
 
 		return err
 	}
@@ -71,16 +88,50 @@ func (b *boundedLocker) UnlockByTxID(ctx context.Context, consumerTxID transacti
 	return b.Locker.UnlockByTxID(ctx, consumerTxID)
 }
 
-func (b *boundedLocker) Cleanup(ctx context.Context, leaseExpiry time.Duration) error {
-	// The Cleanup path removes expired locks from the store; we clear all
-	// in-memory counters because we cannot know which txIDs were cleaned.
-	b.counts.Clear()
+// ForgetTx drops the lock counter for consumerTxID without touching the store.
+// Manager calls it when a selector is closed: after a successful selection the
+// locks must survive (the transaction still needs them) but the counter is dead
+// weight, and nothing else would ever remove it on a replica that does not win
+// cleanup leadership.
+func (b *boundedLocker) ForgetTx(consumerTxID transaction.ID) {
+	b.counts.Delete(consumerTxID)
+}
 
+// EvictStaleTxState drops counters whose last reservation is older than
+// olderThan, i.e. transactions whose locks the store itself considers expired.
+// It deliberately does not clear every counter: an in-flight transaction that
+// legitimately holds N locks would then be handed a fresh budget and could
+// acquire maxLocksPerTx more, making the ceiling "per transaction per cleanup
+// tick" rather than per transaction.
+func (b *boundedLocker) EvictStaleTxState(olderThan time.Duration) {
+	cutoff := time.Now().Add(-olderThan)
+	b.counts.Range(func(k, v any) bool {
+		c, ok := v.(*txLockCounter)
+		if !ok {
+			b.counts.Delete(k)
+
+			return true
+		}
+		// Re-check staleness immediately before deleting, and delete only if
+		// the entry is still the one inspected, so a reservation taken
+		// concurrently is not silently discarded.
+		if c.staleAt(cutoff) {
+			b.counts.CompareAndDelete(k, v)
+		}
+
+		return true
+	})
+}
+
+func (b *boundedLocker) Cleanup(ctx context.Context, leaseExpiry time.Duration) error {
+	// Counter eviction is deliberately not done here: Cleanup only runs on the
+	// replica that wins cleanup leadership, while the counters are local to
+	// every replica. Manager drives EvictStaleTxState on each tick instead.
 	return b.Locker.Cleanup(ctx, leaseExpiry)
 }
 
-func (b *boundedLocker) counter(txID transaction.ID) *atomic.Int64 {
-	v, _ := b.counts.LoadOrStore(txID, new(atomic.Int64))
+func (b *boundedLocker) counter(txID transaction.ID) *txLockCounter {
+	v, _ := b.counts.LoadOrStore(txID, new(txLockCounter))
 
-	return v.(*atomic.Int64) //nolint:forcetypeassert
+	return v.(*txLockCounter) //nolint:forcetypeassert
 }

@@ -285,7 +285,12 @@ func TestNew(t *testing.T) {
 
 			if tt.expectError {
 				require.Error(t, err)
-				assert.Nil(t, cfg)
+				// New returns a usable zero-value Config alongside the error:
+				// callers log it and continue with defaults, so a nil here
+				// would panic on the first Get*/Validate call.
+				require.NotNil(t, cfg)
+				assert.Equal(t, &Config{}, cfg, "a failed unmarshal must not leave partial values")
+				assert.Equal(t, defaultMaxTokensPerSelection, cfg.GetMaxTokensPerSelection())
 			} else {
 				require.NoError(t, err)
 				assert.NotNil(t, cfg)

@@ -35,6 +35,14 @@ func NewService(
 		logger.Errorf("error getting selector config, using defaults. %s", err.Error())
 	}
 
+	// Validate configuration. This is the default selector driver, so a
+	// rejected configuration would otherwise be applied silently, with no
+	// warning at all.
+	if err := cfg.Validate(); err != nil {
+		logger.Errorf("invalid selector configuration: %s, using defaults", err.Error())
+		cfg = &config.Config{}
+	}
+
 	svc := &SelectorService{}
 	loader := &loader{
 		tokenLockStoreServiceManager: tokenLockStoreServiceManager,

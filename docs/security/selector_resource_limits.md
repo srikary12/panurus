@@ -127,7 +127,16 @@ token:
 
 **When it triggers**: When a transaction tries to acquire more locks than configured
 
-**Error message**: `"lock limit exceeded: transaction TX already holds 5000 locks (max: 5000)"`
+**Error message**: `"lock limit exceeded: transaction TX already holds 5000 locks (max: 5000)"`,
+wrapping `token.SelectorRateLimited` so the selection aborts immediately instead
+of treating the denial as contention and retrying.
+
+The count is tracked per transaction for the whole life of that transaction: it
+is released when the transaction's locks are released (`UnlockByTxID`) or when
+its selector is closed, and stale counters are reclaimed once a transaction has
+been idle longer than `leaseExpiry`. Periodic lock cleanup does **not** reset
+live counters, so the ceiling cannot be circumvented by waiting for a cleanup
+tick.
 
 **Tuning guidance**:
 - Should be ≤ `maxTokensPerSelection` (validation enforced)
@@ -138,7 +147,17 @@ token:
 
 **What it limits**: Maximum time allowed for entire selection operation
 
-**Default**: 30 seconds
+**Default**: 30 seconds *plus* the worst-case retry budget, i.e.
+`30s + maxRetryCycles * retryInterval`. With the default 10 retry cycles and a
+5s `retryInterval` the effective default is 80s.
+
+The retry budget is added because both selectors sleep for up to
+`retryInterval` between cycles: a fixed 30s ceiling would expire while the
+retries that are meant to resolve contention are still in progress, turning
+ordinary contention into a timeout that the caller cannot resolve by retrying.
+An explicitly configured `selectionTimeout` is always used as-is.
+
+A non-positive value means **no timeout**.
 
 **Configuration**:
 ```yaml
@@ -150,11 +169,15 @@ token:
 
 **When it triggers**: When selection takes longer than configured timeout
 
-**Error message**: `"token selection aborted: exceeded timeout (30s) after examining X tokens and Y lock attempts"`
+**Error message**: `"token selection aborted: exceeded timeout (30s) after examining X tokens and Y lock attempts"`,
+wrapping the `token.SelectorTimedOut` sentinel so callers can distinguish a
+timeout from a permanent failure.
 
 **Tuning guidance**:
 - **Increase** for slow databases or bulk operations
 - **Decrease** for faster failure detection
+- Keep it above `maxRetryCycles * retryInterval`, or the timeout will fire
+  before the retry budget is spent
 - Consider database query performance when setting
 
 ## Configuration Examples
@@ -348,7 +371,9 @@ type TokenLockStore interface {
 ```
 
 The built-in in-memory locker and the SQL-backed `TokenLockStore` accept `walletID`
-but do not act on it — they apply no rate limiting or quota.
+but do not act on it — they apply no per-wallet rate limiting or quota. They do
+enforce the per-transaction `maxLocksPerTransaction` ceiling described above, and
+report it through this same contract.
 
 ### The fail-fast contract
 

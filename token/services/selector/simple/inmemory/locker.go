@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/LFDT-Panurus/panurus/token"
 	"github.com/LFDT-Panurus/panurus/token/services/logging"
 	"github.com/LFDT-Panurus/panurus/token/services/selector/simple"
 	"github.com/LFDT-Panurus/panurus/token/services/storage/ttxdb"
@@ -243,7 +244,13 @@ func (d *locker) lockInShard(ctx context.Context, s *shard, owner string, id *to
 	// live in this owner's shard and counting within it is per-transaction.
 	if d.maxLocksPerTx > 0 {
 		if txLockCount := s.txLocks[txID]; txLockCount >= d.maxLocksPerTx {
-			return "", errors.Errorf(
+			// Wrap SelectorRateLimited so the selector aborts immediately.
+			// Without the sentinel the selector reads this as "some other
+			// process holds the token", counts the quantity as potentially
+			// available and keeps retrying, so a transaction that hit its own
+			// ceiling burns the whole retry budget and then reports
+			// SelectorSufficientButLockedFunds — which callers retry forever.
+			return "", errors.WithMessagef(token.SelectorRateLimited,
 				"lock limit exceeded: transaction %s already holds %d locks (max: %d)",
 				txID, txLockCount, d.maxLocksPerTx,
 			)
