@@ -85,9 +85,16 @@ func (s *WalletStore) GetWalletID(ctx context.Context, identity driver2.Identity
 	if err != nil {
 		return "", errors.Wrapf(err, "failed to create key")
 	}
+	// kvs.Get returns an error both for a missing key and for a real store failure.
+	// The WalletStoreService contract requires that "no binding" be reported as ("", nil)
+	// so that callers can distinguish it from a transient storage error; probe with Exists
+	// first (as IdentityExists does) and only Get when a binding is present.
+	if !s.kvs.Exists(ctx, k) {
+		return "", nil
+	}
 	var wID storage.WalletID
 	if err := s.kvs.Get(ctx, k, &wID); err != nil {
-		return "", err
+		return "", errors.Wrapf(err, "failed to get wallet id for identity [%v]", idHash)
 	}
 
 	return wID, nil
