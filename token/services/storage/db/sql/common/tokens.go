@@ -1638,11 +1638,8 @@ func (t *TokenTransaction) StoreToken(ctx context.Context, tr driver.TokenRecord
 	}
 	// The amount column is NUMERIC(78, 0) NOT NULL: refuse a missing or over-range value
 	// rather than storing one that disagrees with the authoritative quantity column.
-	if tr.Amount == nil {
-		return errors.Errorf("no amount specified for token [%s:%d]", tr.TxID, tr.Index)
-	}
-	if tr.Amount.BitLen() > maxAmountBits {
-		return errors.Errorf("amount [%s] exceeds maximum supported size of %d bits", tr.Amount, maxAmountBits)
+	if err := validateAmount(tr.Amount); err != nil {
+		return errors.WithMessagef(err, "invalid amount for token [%s:%d]", tr.TxID, tr.Index)
 	}
 
 	// Store token

@@ -355,3 +355,10 @@ type TokenLockStore interface {
 }
 
 var ErrTokenDoesNotExist = errors.New("token does not exist")
+
+// ErrAmountMissing is returned when a record carries no amount. The amount column is NOT NULL.
+var ErrAmountMissing = errors.New("no amount specified")
+
+// ErrAmountOutOfRange is returned when an amount is too wide for the amount column to hold.
+// Storing it would leave the amount disagreeing with the authoritative quantity.
+var ErrAmountOutOfRange = errors.New("amount exceeds maximum supported size")

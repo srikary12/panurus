@@ -945,13 +945,13 @@ func TAmountValidation(t *testing.T, db TestTokenDB) {
 	tooBig.TxID = "txTooBig"
 	tooBig.Amount = new(big.Int).Lsh(big.NewInt(1), 256)
 	tooBig.Quantity = "0x" + tooBig.Amount.Text(16)
-	require.ErrorContains(t, db.StoreToken(ctx, tooBig, []string{"alice"}), "exceeds maximum supported size")
+	require.ErrorIs(t, db.StoreToken(ctx, tooBig, []string{"alice"}), driver2.ErrAmountOutOfRange)
 
 	// A missing amount is refused as well: the column is NOT NULL.
 	noAmount := bigAmountRecord()
 	noAmount.TxID = "txNoAmount"
 	noAmount.Amount = nil
-	require.ErrorContains(t, db.StoreToken(ctx, noAmount, []string{"alice"}), "no amount specified")
+	require.ErrorIs(t, db.StoreToken(ctx, noAmount, []string{"alice"}), driver2.ErrAmountMissing)
 
 	// A record whose amount fits is accepted, and the authoritative quantity is preserved.
 	record := bigAmountRecord()

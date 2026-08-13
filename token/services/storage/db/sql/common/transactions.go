@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	errors2 "errors"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 
@@ -36,6 +37,20 @@ import (
 // NUMERIC(78, 0) stores up to 10^78 values, fitting in ~259 bits.
 // 255 is used as a conservative safe upper bound.
 const maxAmountBits = 255
+
+// validateAmount reports whether amount can be stored in an amount column without loss.
+// Callers must run it before inserting, so that a value the column cannot hold surfaces as
+// an error instead of a row whose amount disagrees with its quantity.
+func validateAmount(amount *big.Int) error {
+	if amount == nil {
+		return dbdriver.ErrAmountMissing
+	}
+	if amount.BitLen() > maxAmountBits {
+		return errors.WithMessagef(dbdriver.ErrAmountOutOfRange, "amount [%s] does not fit in %d bits", amount, maxAmountBits)
+	}
+
+	return nil
+}
 
 type transactionTables struct {
 	Movements             string
@@ -637,8 +652,8 @@ func (w *TransactionStoreTransaction) AddTransaction(ctx context.Context, rs ...
 		if err != nil {
 			return errors.Wrapf(err, "error generating uuid")
 		}
-		if r.Amount.BitLen() > maxAmountBits {
-			return errors.Errorf("amount [%s] exceeds maximum supported size of %d bits", r.Amount, maxAmountBits)
+		if err := validateAmount(r.Amount); err != nil {
+			return errors.WithMessagef(err, "invalid amount for record [%s]", r.TxID)
 		}
 		rows[i] = common3.Tuple{id, r.TxID, int(r.ActionType), r.SenderEID, r.RecipientEID, r.TokenType, r.Amount.String(), r.Timestamp.UTC()}
 	}
@@ -703,8 +718,8 @@ func (w *TransactionStoreTransaction) AddMovement(ctx context.Context, rs ...dbd
 		if err != nil {
 			return errors.Wrapf(err, "error generating uuid")
 		}
-		if r.Amount.BitLen() > maxAmountBits {
-			return errors.Errorf("amount [%s] exceeds maximum supported size of %d bits", r.Amount, maxAmountBits)
+		if err := validateAmount(r.Amount); err != nil {
+			return errors.WithMessagef(err, "invalid amount for record [%s]", r.TxID)
 		}
 		rows[i] = common3.Tuple{id, r.TxID, r.EnrollmentID, r.TokenType, r.Amount.String(), now}
 	}
