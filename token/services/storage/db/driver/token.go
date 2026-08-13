@@ -46,8 +46,9 @@ type TokenRecord struct {
 	Quantity string
 	// Type is the type of token
 	Type token.Type
-	// Amount is the Quantity converted to decimal
-	Amount uint64
+	// Amount is the Quantity converted to decimal as a big integer to support arbitrary
+	// precision. It must be non-nil and match Quantity.
+	Amount *big.Int
 	// Owner is used to mark the token as owned by this node
 	Owner bool
 	// Auditor is used to mark this token as audited by this node

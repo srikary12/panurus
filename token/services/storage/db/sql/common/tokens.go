@@ -1636,6 +1636,14 @@ func (t *TokenTransaction) StoreToken(ctx context.Context, tr driver.TokenRecord
 	if len(tr.OwnerWalletID) == 0 && len(owners) == 0 && tr.Owner {
 		return errors.Errorf("no owners specified [%s]", string(debug.Stack()))
 	}
+	// The amount column is NUMERIC(78, 0) NOT NULL: refuse a missing or over-range value
+	// rather than storing one that disagrees with the authoritative quantity column.
+	if tr.Amount == nil {
+		return errors.Errorf("no amount specified for token [%s:%d]", tr.TxID, tr.Index)
+	}
+	if tr.Amount.BitLen() > maxAmountBits {
+		return errors.Errorf("amount [%s] exceeds maximum supported size of %d bits", tr.Amount, maxAmountBits)
+	}
 
 	// Store token
 	query, args := q.InsertInto(t.table.Tokens).
@@ -1653,7 +1661,7 @@ func (t *TokenTransaction) StoreToken(ctx context.Context, tr driver.TokenRecord
 			tr.LedgerMetadata,
 			tr.Type,
 			tr.Quantity,
-			tr.Amount,
+			tr.Amount.String(),
 			time.Now().UTC(),
 			tr.Owner,
 			tr.Auditor,
