@@ -54,6 +54,35 @@ are already covered by CI's parallel per-infra jobs.
   It saves one cleaned, timestamp-stripped log file per failed job under
   `pr_<PR_NUMBER>_failed_logs/`.
 
+## Public Parameters Setup Failures (fabricx)
+
+On a fabricx network the token public parameters are installed by invoking the
+`SetupPublicParams` view on the `issuer` FSC node
+(`integration/nwo/token/fabricx/factory.go`). Two things about how that failure is
+reported are worth knowing when a suite goes red:
+
+- **Installation is asynchronous.** `Backend.InstallPublicParams` is called from
+  `PostRun` and returns as soon as the work is scheduled, because it has to wait for the
+  issuer node to accept connections. Its outcome is recorded on the backend and reported
+  later:
+  - `NetworkHandler.UpdatePublicParams` checks it first, so a spec that updates the
+    public parameters fails with the original installation error rather than with a
+    confusing follow-up failure;
+  - `NetworkHandler.Cleanup` logs it at teardown (`public params installation for [...]
+    failed: ...`), so grep the suite log for that line when a network never became usable
+    but no spec pointed at the public parameters;
+  - a test can also block on it explicitly with
+    `Backend.WaitForPublicParams(tms, timeout)`.
+- **A not-yet-started issuer is a wait, not a failure.** Both `InstallPublicParams` and
+  `UpdatePublicParams` retry the issuer client lookup (60 attempts, 1s apart by default,
+  configurable via the `ClientRetries`/`ClientRetryDelay`/`InstallDelay` fields of
+  `Backend`). `client [issuer] not ready after 60 attempts` therefore means the issuer FSC
+  node never came up — look at its own logs, not at the token platform.
+- **Neither path panics.** A `SetupPublicParams` failure surfaces as a test failure
+  wrapping the view error (`failed setting up the public params on
+  [network:channel:namespace:driver]`). A process that dies with
+  `panic: failed updating pps` is running an old build.
+
 ## Debugging Techniques
 - **Manual Inspection**: Use `time.Sleep()` or pause loops in tests to inspect Docker state
 - **Network Preservation**: Check for `no-cleanup` option or manually comment test suite cleanup

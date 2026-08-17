@@ -38,8 +38,17 @@ type Entry struct {
 
 type Backend interface {
 	PrepareNamespace(tms *topology2.TMS)
-	UpdatePublicParams(tms *topology2.TMS, raw []byte)
-	InstallPublicParams(tms *topology2.TMS, raw []byte)
+	UpdatePublicParams(tms *topology2.TMS, raw []byte) error
+	InstallPublicParams(tms *topology2.TMS, raw []byte) error
+}
+
+// PublicParamsInstallWatcher is implemented by backends that install the public parameters
+// in the background and can report the outcome of that work after InstallPublicParams has
+// returned.
+type PublicParamsInstallWatcher interface {
+	// PendingInstallError returns the failure recorded by the background installation of the
+	// public parameters of tms, or nil if it succeeded, is still running, or never started.
+	PendingInstallError(tms *topology2.TMS) error
 }
 
 type NetworkHandler struct {
@@ -149,7 +158,8 @@ func (p *NetworkHandler) PostRun(load bool, tms *topology2.TMS) {
 		}
 	}
 
-	p.Backend.InstallPublicParams(tms, p.TokenPlatform.PublicParameters(tms))
+	err := p.Backend.InstallPublicParams(tms, p.TokenPlatform.PublicParameters(tms))
+	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "failed installing public params for [%s]", tms.ID())
 }
 
 func (p *NetworkHandler) Cleanup() {
@@ -157,11 +167,34 @@ func (p *NetworkHandler) Cleanup() {
 		if entry.CA != nil {
 			entry.CA.Stop()
 		}
+		// report a background public params installation that failed after PostRun returned,
+		// so that it does not go unnoticed. Cleanup runs at teardown, where raising an
+		// assertion would hide the failures of the tests themselves.
+		if err := p.pendingInstallError(entry.TMS); err != nil {
+			logger.Errorf("public params installation for [%s] failed: %v", entry.TMS.ID(), err)
+		}
 	}
 }
 
 func (p *NetworkHandler) UpdatePublicParams(tms *topology2.TMS, ppRaw []byte) {
-	p.Backend.UpdatePublicParams(tms, ppRaw)
+	// a failed background installation is the most likely cause of a failing update,
+	// and it carries the original error, so report it first
+	err := p.pendingInstallError(tms)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "public params installation for [%s] failed", tms.ID())
+
+	err = p.Backend.UpdatePublicParams(tms, ppRaw)
+	gomega.Expect(err).ToNot(gomega.HaveOccurred(), "failed updating public params for [%s]", tms.ID())
+}
+
+// pendingInstallError returns the failure of the background public params installation for
+// tms, if the backend tracks one, and nil otherwise.
+func (p *NetworkHandler) pendingInstallError(tms *topology2.TMS) error {
+	watcher, ok := p.Backend.(PublicParamsInstallWatcher)
+	if !ok {
+		return nil
+	}
+
+	return watcher.PendingInstallError(tms)
 }
 
 func (p *NetworkHandler) GenIssuerCryptoMaterial(tms *topology2.TMS, nodeID string, walletID string) string {
