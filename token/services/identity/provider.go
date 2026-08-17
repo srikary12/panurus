@@ -148,15 +148,25 @@ func (p *Provider) RegisterSigner(ctx context.Context, identity driver.Identity,
 // Each identity is resolved via the signer cache and configured storage.
 // There is no secondary "is me" cache: a real cache would need careful handling for
 // single-use identities (for example Idemix nyms) and is intentionally omitted here.
-func (p *Provider) AreMe(ctx context.Context, identities ...driver.Identity) []string {
+// A non-nil error means the storage lookup failed and the returned slice is not
+// authoritative: identities that could not be checked are absent from it precisely because
+// the check failed, not because they are unknown.
+func (p *Provider) AreMe(ctx context.Context, identities ...driver.Identity) ([]string, error) {
 	p.Logger.DebugfContext(ctx, "identity [%s] is me?", identities)
 
 	return p.areMe(ctx, identities...)
 }
 
-// IsMe returns true if a signer was ever registered for the passed identity
-func (p *Provider) IsMe(ctx context.Context, identity driver.Identity) bool {
-	return len(p.AreMe(ctx, identity)) > 0
+// IsMe returns true if a signer was ever registered for the passed identity.
+// A non-nil error means ownership could not be determined; the boolean must be ignored in
+// that case rather than treated as an authoritative "not mine".
+func (p *Provider) IsMe(ctx context.Context, identity driver.Identity) (bool, error) {
+	me, err := p.AreMe(ctx, identity)
+	if err != nil {
+		return false, err
+	}
+
+	return len(me) > 0, nil
 }
 
 // GetAuditInfo returns the audit information associated to the passed identity, nil otherwise.
@@ -243,7 +253,7 @@ func (p *Provider) RegisterIdentityDescriptor(ctx context.Context, identityDescr
 	return nil
 }
 
-func (p *Provider) areMe(ctx context.Context, identities ...driver.Identity) []string {
+func (p *Provider) areMe(ctx context.Context, identities ...driver.Identity) ([]string, error) {
 	p.Logger.DebugfContext(ctx, "is me [%s]?", identities)
 	idHashes := make([]string, len(identities))
 	for i, id := range identities {
@@ -264,19 +274,20 @@ func (p *Provider) areMe(ctx context.Context, identities ...driver.Identity) []s
 	}
 
 	if len(notFound) == 0 {
-		return result.ToSlice()
+		return result.ToSlice(), nil
 	}
 
-	// check Storage
+	// check Storage. A failure here must not be flattened into a negative answer: the
+	// identities we could not check are exactly the ones in notFound, and silently dropping
+	// them would report an owned identity as not-owned. Propagate instead so callers can tell
+	// "confirmed not mine" from "couldn't check".
 	found, err := p.storage.GetExistingSignerInfo(ctx, notFound...)
 	if err != nil {
-		p.Logger.Errorf("failed checking if a signer exists [%s]", err)
-
-		return result.ToSlice()
+		return nil, errors.Wrapf(err, "failed checking if a signer exists")
 	}
 	result.Add(found...)
 
-	return result.ToSlice()
+	return result.ToSlice(), nil
 }
 
 func (p *Provider) getSigner(ctx context.Context, identity driver.Identity, idHash string) (driver.Signer, error) {

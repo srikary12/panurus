@@ -70,7 +70,7 @@ func newTestEndorseViewContext(t *testing.T, input *TestEndorseViewContextInput)
 	tms.IDReturns(tmsID)
 	tokenDes := &mock.Deserializer{}
 	tokenIP := &mock.IdentityProvider{}
-	tokenIP.IsMeReturns(true)
+	tokenIP.IsMeReturns(true, nil)
 	tokenSigner := &mock.Signer{}
 	tokenSigner.SignReturns([]byte("a_token_sigma"), nil)
 	tokenIP.GetSignerReturns(tokenSigner, nil)

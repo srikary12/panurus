@@ -70,8 +70,59 @@ func TestProvider_RegisterSigner_And_IsMe(t *testing.T) {
 	require.Equal(t, 1, storage.RegisterIdentityDescriptorCallCount())
 
 	// provider should now consider this identity as "me"
-	isMe := p.IsMe(t.Context(), id)
+	isMe, err := p.IsMe(t.Context(), id)
+	require.NoError(t, err)
 	assert.True(t, isMe)
+}
+
+// TestProvider_IsMe_StorageErrorIsPropagated is a regression test for issue #2066: a storage
+// failure while checking ownership of an uncached identity must be surfaced, not silently
+// flattened into a "not mine" answer.
+func TestProvider_IsMe_StorageErrorIsPropagated(t *testing.T) {
+	storage := &idmock.Storage{}
+	des := &idmock.Deserializer{}
+	nbs := &idmock.NetworkBinderService{}
+	eidu := &idmock.EnrollmentIDUnmarshaler{}
+
+	p := identity.NewProvider(logging.MustGetLogger(), storage, des, nbs, eidu, nil)
+
+	// The identity is not warm in the cache, so areMe must consult storage, which fails.
+	storage.GetExistingSignerInfoReturns(nil, errors.New("boom"))
+
+	id := driver.Identity("owned_but_uncached")
+
+	isMe, err := p.IsMe(t.Context(), id)
+	require.Error(t, err, "a storage failure must be propagated, not reported as a confident 'not mine'")
+	assert.False(t, isMe, "the boolean must not be trusted when an error is returned")
+
+	me, err := p.AreMe(t.Context(), id)
+	require.Error(t, err)
+	assert.Nil(t, me)
+}
+
+// TestProvider_AreMe_StorageErrorDoesNotLeakCacheOnlyResult verifies the exact failure mode from
+// issue #2066: when some identities are cache hits and the storage lookup for the rest fails,
+// AreMe must return the error rather than a cache-only slice that would report the uncheckable
+// identities as "not mine".
+func TestProvider_AreMe_StorageErrorDoesNotLeakCacheOnlyResult(t *testing.T) {
+	storage := &idmock.Storage{}
+	des := &idmock.Deserializer{}
+	nbs := &idmock.NetworkBinderService{}
+	eidu := &idmock.EnrollmentIDUnmarshaler{}
+
+	p := identity.NewProvider(logging.MustGetLogger(), storage, des, nbs, eidu, nil)
+
+	// Warm the cache for `cached` by registering a signer for it.
+	cached := driver.Identity("cached")
+	storage.RegisterIdentityDescriptorReturns(nil)
+	require.NoError(t, p.RegisterSigner(t.Context(), cached, &drvmock.Signer{}, &drvmock.Verifier{}, nil, false))
+
+	// The storage lookup for the remaining (uncached) identity fails.
+	storage.GetExistingSignerInfoReturns(nil, errors.New("boom"))
+
+	me, err := p.AreMe(t.Context(), cached, driver.Identity("uncached"))
+	require.Error(t, err, "a storage failure must not be masked by the cache-hit portion of the result")
+	assert.Nil(t, me)
 }
 
 func TestProvider_GetSigner_Deserializable(t *testing.T) {

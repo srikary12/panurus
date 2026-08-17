@@ -29,7 +29,9 @@ func AssertTokens(sp token.ServiceProvider, tx *ttx.Transaction, outputs *token.
 	assert.NoError(err, "failed to get token db for [%s]", tx.TokenService().ID())
 	for _, output := range outputs.Outputs() {
 		tokenID := output.ID(token.RequestAnchor(tx.ID()))
-		if output.Owner.Equal(id) || tx.TokenService().SigService().IsMe(ctx, output.Owner) {
+		isMe, err := tx.TokenService().SigService().IsMe(ctx, output.Owner)
+		assert.NoError(err, "failed to check ownership of [%s]", output.Owner)
+		if output.Owner.Equal(id) || isMe {
 			// check it exists
 			toks, err := db.GetTokens(ctx, tokenID)
 			assert.NoError(err, "failed to retrieve token [%s]", tokenID)

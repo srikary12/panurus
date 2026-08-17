@@ -71,7 +71,7 @@ func newSpendTestContext(t *testing.T, areMe []string, sessions map[string]view.
 	tms.PublicParamsManagerReturns(ppm)
 
 	ip := &driver_mock.IdentityProvider{}
-	ip.AreMeReturns(areMe)
+	ip.AreMeReturns(areMe, nil)
 	tms.IdentityProviderReturns(ip)
 	tms.DeserializerReturns(&driver_mock.Deserializer{})
 

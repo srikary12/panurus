@@ -125,11 +125,12 @@ func TestSignatureService_IsMe(t *testing.T) {
 		identityProvider: ip,
 	}
 
-	ip.IsMeReturns(true)
+	ip.IsMeReturns(true, nil)
 
 	id := []byte("identity")
-	isMe := service.IsMe(t.Context(), id)
+	isMe, err := service.IsMe(t.Context(), id)
 
+	require.NoError(t, err)
 	assert.True(t, isMe)
 }
 
@@ -181,10 +182,11 @@ func TestSignatureService_AreMe(t *testing.T) {
 	id2 := []byte("identity2")
 	expectedHashes := []string{"hash1", "hash2"}
 
-	ip.AreMeReturns(expectedHashes)
+	ip.AreMeReturns(expectedHashes, nil)
 
-	hashes := service.AreMe(t.Context(), id1, id2)
+	hashes, err := service.AreMe(t.Context(), id1, id2)
 
+	require.NoError(t, err)
 	assert.Equal(t, expectedHashes, hashes)
 	assert.Equal(t, 1, ip.AreMeCallCount())
 }
