@@ -73,8 +73,13 @@ func New(logger logging.Logger, cs ConfigService, reporter Reporter) (*Stack, er
 	reporting := sigobserve.Multi(metricsObserver, auditObserver)
 	escalator := throttle.New(cfg, throttle.WithObserver(reporting), throttle.WithLevelGauge(gauge))
 
+	observers := []sigobserve.Observer{metricsObserver, auditObserver}
+	if cfg.Enabled() {
+		observers = append(observers, escalator)
+	}
+
 	s := &Stack{
-		observer:  sigobserve.Multi(metricsObserver, auditObserver, escalator),
+		observer:  sigobserve.Multi(observers...),
 		escalator: escalator,
 		config:    cfg,
 	}

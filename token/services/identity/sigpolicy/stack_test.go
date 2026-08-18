@@ -141,6 +141,19 @@ func TestNewStackDisabledHasNoGate(t *testing.T) {
 	assert.NotNil(t, s.Observer(), "instrumentation stays available even with the policy off")
 }
 
+// TestNewStackDisabledWithoutSinksCostsNothing pins the other half of "off": with the policy
+// disabled and neither metrics nor a logger configured, the escalator has nothing left to feed
+// and the observer collapses to Nop, so InstrumentSigner/InstrumentVerifier skip wrapping
+// entirely and the signing path pays nothing for a feature that is switched off.
+func TestNewStackDisabledWithoutSinksCostsNothing(t *testing.T) {
+	s, err := sigpolicy.New(nil, &fakeConfigService{config: &throttle.Config{Mode: throttle.ModeOff}}, nil)
+	require.NoError(t, err)
+	t.Cleanup(s.Stop)
+
+	assert.Nil(t, s.Gate())
+	assert.Equal(t, sigobserve.Nop, s.Observer(), "off with no sinks must collapse to Nop, not merely a functioning escalator")
+}
+
 func TestNewStackConfigError(t *testing.T) {
 	_, err := sigpolicy.New(logging.MustGetLogger(), &fakeConfigService{err: errors.New("bad yaml")}, newFakeReporter())
 	require.ErrorContains(t, err, "failed unmarshalling [identity.throttle]")
