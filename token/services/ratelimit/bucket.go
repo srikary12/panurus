@@ -196,6 +196,18 @@ func (s *BucketSet) Len() int {
 	return len(s.buckets)
 }
 
+// EvictIdleNow runs one eviction sweep immediately, outside of the background ticker. It is
+// intended for tests that need deterministic control over when idle buckets are reclaimed.
+func (s *BucketSet) EvictIdleNow() {
+	s.evictIdle()
+}
+
+// SetNow replaces the clock used by the set. It is intended for tests that need a manually
+// advanced clock; callers must call it before any other method on the set.
+func (s *BucketSet) SetNow(fn func() time.Time) {
+	s.now = fn
+}
+
 // Stop terminates the eviction goroutine. Buckets are left in place, so a set that is still
 // consulted after Stop keeps enforcing its limits; it simply stops reclaiming the memory of
 // idle keys. Stop is idempotent.
@@ -241,8 +253,9 @@ func (s *BucketSet) evictLoop(interval time.Duration) {
 
 // evictIdle drops the buckets of keys that have made no request within idleTTL. Such a
 // bucket has already refilled to capacity, so dropping it loses no accounting. Keys with a
-// quota override are never evicted: their bucket is the only record that they are still
-// being throttled.
+// quota override are skipped as a safety net: the caller is expected to call ClearRate before
+// evicting a principal, but if it does not, the bucket is retained rather than silently
+// restoring the default quota for a key that is still being throttled.
 func (s *BucketSet) evictIdle() {
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -514,6 +514,10 @@ func (e *Escalator) evictIdle() {
 	cutoff := e.now().Add(-e.cfg.IdleTTL)
 	for id, p := range e.principals {
 		if p.level == LevelNormal && p.lastSeen.Before(cutoff) {
+			// Clear the override before dropping the principal so the BucketSet's own
+			// idle eviction can reclaim the bucket. Without this, the bucket stays pinned
+			// by its overridden flag even after the principal that set it is gone.
+			e.buckets.ClearRate(id)
 			delete(e.principals, id)
 		}
 	}

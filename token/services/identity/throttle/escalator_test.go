@@ -111,6 +111,9 @@ func newTestEscalator(t *testing.T, cfg *Config, clock *testClock, opts ...Optio
 	e := New(cfg, opts...)
 	t.Cleanup(e.Stop)
 	e.now = clock.Now
+	if e.buckets != nil {
+		e.buckets.SetNow(clock.Now)
+	}
 
 	return e
 }
@@ -555,6 +558,46 @@ func TestEscalatorEvictIdle(t *testing.T) {
 
 	assert.False(t, idleKept, "an idle unthrottled principal costs memory for nothing")
 	assert.True(t, throttledKept, "a throttled principal's state is the only record that it is throttled")
+}
+
+// TestEscalatorEvictIdleClearsBucketOverride pins the coupling between the escalator's
+// evictIdle and BucketSet.ClearRate: when an idle principal is evicted, its bucket override
+// must be cleared so the BucketSet's own idle eviction can reclaim the bucket. Without the
+// ClearRate call the bucket stays pinned by its overridden flag and leaks indefinitely.
+//
+// The scenario is constructed by injecting a stale override directly — bypassing the normal
+// transition path — to simulate the case where a bug or future code change leaves a
+// LevelNormal principal with an overridden bucket.
+func TestEscalatorEvictIdleClearsBucketOverride(t *testing.T) {
+	cfg := enforcing()
+	cfg.IdleTTL = time.Minute
+	clock := newTestClock()
+	e := newTestEscalator(t, cfg, clock)
+
+	// Touch alice so her bucket and principal entry both exist.
+	require.NoError(t, e.Allow(t.Context(), alice, sigobserve.OpSign))
+	require.Equal(t, LevelNormal, e.Level(alice))
+
+	// Inject a stale override on the bucket (simulating a bug where the override was not
+	// cleared when the principal returned to normal).
+	e.buckets.SetRate(alice, 0.1, 1)
+	require.Equal(t, 1, e.buckets.Len(), "pre-condition: bucket must exist")
+
+	// Advance past IdleTTL and trigger the escalator's eviction sweep.
+	clock.advance(2 * time.Minute)
+	e.evictIdle()
+
+	// The principal must be gone from the escalator …
+	e.mu.Lock()
+	_, kept := e.principals[alice]
+	e.mu.Unlock()
+	require.False(t, kept, "idle normal principal must be evicted")
+
+	// … and the stale override must have been cleared, so the BucketSet's idle eviction can
+	// reclaim the bucket. Verify by triggering a BucketSet eviction sweep: since alice's
+	// bucket was last touched before the cutoff, it must be swept away.
+	e.buckets.EvictIdleNow()
+	assert.Equal(t, 0, e.buckets.Len(), "stale bucket must be reclaimed once its override is cleared")
 }
 
 func TestEscalatorStopIsIdempotent(t *testing.T) {
