@@ -321,6 +321,13 @@ func TestEscalatorSecondViolationBlocks(t *testing.T) {
 	observeInvalid(t, e, alice, 2)
 	require.Equal(t, LevelSoft, e.Level(alice))
 
+	// Violations that arrive while the principal is still serving its minimum SoftDuration
+	// must be absorbed: they re-arm the quiet-period clock but do not push to blocked.
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice), "a second violation within SoftDuration must not skip straight to blocked")
+
+	// Only after the minimum soft period has elapsed can continued misbehaviour escalate.
+	clock.advance(61 * time.Second)
 	observeInvalid(t, e, alice, 2)
 	require.Equal(t, LevelBlocked, e.Level(alice))
 
@@ -333,11 +340,65 @@ func TestEscalatorSecondViolationBlocks(t *testing.T) {
 	}, r.levels())
 }
 
+// TestEscalatorSoftDurationIsHonouredBeforeBlocking pins the fix for the graduated-escalation
+// bug: a principal must actually serve its reduced-quota period before continued misbehaviour
+// can push it to blocked. Without the fix, request 11 reached soft and request 12 reached
+// blocked, giving a principal no time at the reduced quota.
+func TestEscalatorSoftDurationIsHonouredBeforeBlocking(t *testing.T) {
+	cfg := &Config{
+		Mode:                          ModeEnforce,
+		Rate:                          10,
+		Burst:                         10,
+		MinSamples:                    2,
+		ErrorRateThreshold:            0.99,
+		InvalidSignatureRateThreshold: 0.99,
+		SoftDuration:                  5 * time.Minute,
+		BlockDuration:                 time.Minute,
+		DeescalateAfter:               2 * time.Minute,
+	}
+	clock := newTestClock()
+	r := &recorder{}
+	e := newTestEscalator(t, cfg, clock, WithObserver(r))
+
+	ctx := t.Context()
+
+	// Requests 1-10 drain the burst bucket.
+	for range 10 {
+		require.NoError(t, e.Allow(ctx, alice, sigobserve.OpGetSigner))
+	}
+	require.Equal(t, LevelNormal, e.Level(alice))
+
+	// Request 11: bucket is empty → normal → soft.
+	err := e.Allow(ctx, alice, sigobserve.OpGetSigner)
+	require.ErrorIs(t, err, token.SignatureThrottled)
+	require.Equal(t, LevelSoft, e.Level(alice), "request 11 must reach soft")
+
+	// Request 12: bucket is still empty (soft quota has not refilled yet) but the principal
+	// is still within SoftDuration. It must stay at soft, not skip straight to blocked.
+	err = e.Allow(ctx, alice, sigobserve.OpGetSigner)
+	require.ErrorIs(t, err, token.SignatureThrottled)
+	require.Equal(t, LevelSoft, e.Level(alice), "request 12 must stay at soft — SoftDuration not yet elapsed")
+
+	// Only one escalation event must have fired (normal → soft); there must be no blocked event.
+	assert.Equal(t, [][2]string{
+		{string(LevelSoft), ReasonRate},
+	}, r.levels(), "no blocked event while within SoftDuration")
+
+	// After SoftDuration has elapsed a new threshold breach must escalate to blocked.
+	// Advance past SoftDuration (5 min) and deliver fresh violations via Observe so that
+	// maybeDeescalate (which runs only in decide/Allow) does not fire first.
+	clock.advance(6 * time.Minute)
+	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelBlocked, e.Level(alice), "post-SoftDuration violation must reach blocked")
+}
+
 func TestEscalatorBlockIsRearmedByAFreshViolation(t *testing.T) {
 	clock := newTestClock()
 	e := newTestEscalator(t, enforcing(), clock)
 
 	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice))
+	clock.advance(61 * time.Second) // past SoftDuration so the second wave can escalate
 	observeInvalid(t, e, alice, 2)
 	require.Equal(t, LevelBlocked, e.Level(alice))
 
@@ -359,6 +420,8 @@ func TestEscalatorReleasesABlockedPrincipalToSoft(t *testing.T) {
 	e := newTestEscalator(t, enforcing(), clock, WithObserver(r))
 
 	observeInvalid(t, e, alice, 2)
+	require.Equal(t, LevelSoft, e.Level(alice))
+	clock.advance(61 * time.Second) // past SoftDuration so the second wave can escalate
 	observeInvalid(t, e, alice, 2)
 	require.Equal(t, LevelBlocked, e.Level(alice))
 
@@ -412,8 +475,10 @@ func TestEscalatorReportsThrottledCounts(t *testing.T) {
 	gauge := newFakeGauge()
 	e := newTestEscalator(t, enforcing(), clock, WithLevelGauge(gauge))
 
+	// alice reaches soft; bob reaches soft then, after SoftDuration, blocked.
 	observeInvalid(t, e, alice, 2)
 	observeInvalid(t, e, "bob-hash", 2)
+	clock.advance(61 * time.Second) // past SoftDuration so bob's second wave can escalate
 	observeInvalid(t, e, "bob-hash", 2)
 
 	soft, blocked := e.Throttled()

@@ -376,7 +376,23 @@ func (e *Escalator) totals(p *principal) (total int, errCount int, invalid int) 
 // its block re-armed rather than being pushed further, since there is no level above blocked.
 // Callers must hold e.mu.
 func (e *Escalator) escalate(ctx context.Context, principalID string, p *principal, reason string) {
-	p.lastViolation = e.now()
+	now := e.now()
+
+	// A soft-limited principal that is still serving its minimum SoftDuration has already
+	// been penalised for this episode. Absorb the violation (re-arming the clock so the
+	// quiet-period counter restarts) without pushing it to blocked. This preserves the
+	// graduated response: normal → soft (reduced quota) → blocked, where "soft" lasts at
+	// least SoftDuration before the next escalation can fire.
+	//
+	// A blocked principal is intentionally excluded from this guard: a fresh violation
+	// while blocked must re-arm the block deadline (there is no higher level, and extending
+	// the block is the correct response).
+	if p.level == LevelSoft && now.Before(p.levelUntil) {
+		p.lastViolation = now
+		return
+	}
+
+	p.lastViolation = now
 
 	switch p.level {
 	case LevelNormal:
