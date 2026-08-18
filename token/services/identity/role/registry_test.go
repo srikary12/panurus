@@ -251,6 +251,9 @@ func TestWalletByID_ConcurrentCreation(t *testing.T) {
 		require.Equal(t, "wc", res[i].ID())
 	}
 
+	// concurrent callers for the same wallet id share a single factory call
+	require.Equal(t, 1, wf.NewWalletCallCount())
+
 	// ensure only one was actually registered in the map
 	reg.WalletMu.RLock()
 	defer reg.WalletMu.RUnlock()
@@ -261,6 +264,115 @@ func TestWalletByID_ConcurrentCreation(t *testing.T) {
 		}
 	}
 	require.Equal(t, 1, count)
+}
+
+// TestWalletByID_FactoryReentersRegistry checks that WalletFactory.NewWallet is invoked
+// without the registry lock held: the factory receives the registry itself as
+// IdentitySupport, so it may legitimately call back into it while the wallet is being
+// built. sync.RWMutex is not reentrant, so if WalletByID held WalletMu across the call,
+// this would deadlock forever (hence the timeout, a deadlock has no natural termination).
+func TestWalletByID_FactoryReentersRegistry(t *testing.T) {
+	reg, _, r, wf := newRegistryWithFakes()
+	ctx := t.Context()
+	r.MapToIdentityReturns([]byte("idre"), "wre", nil)
+	r.GetIdentityInfoReturns(&mockIdentityInfo{id: "idre"}, nil)
+
+	created := &mock2.Wallet{}
+	created.IDReturns("wre")
+	wf.NewWalletStub = func(ctx context.Context, id string, roleType idriver.IdentityRoleType, wr role.IdentitySupport, info idriver.IdentityInfo) (driver.Wallet, error) {
+		// simulate a factory that registers the wallet it is building
+		if err := reg.RegisterWallet(ctx, id, created); err != nil {
+			return nil, err
+		}
+
+		return created, nil
+	}
+
+	type result struct {
+		w   driver.Wallet
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		w, err := reg.WalletByID(ctx, 0, []byte("idre"))
+		done <- result{w: w, err: err}
+	}()
+
+	select {
+	case res := <-done:
+		require.NoError(t, res.err)
+		require.Equal(t, "wre", res.w.ID())
+	case <-time.After(10 * time.Second):
+		t.Fatal("WalletByID did not return: the registry lock is held across WalletFactory.NewWallet")
+	}
+
+	require.Equal(t, 1, wf.NewWalletCallCount())
+}
+
+// TestWalletByID_DistinctWalletsAreCreatedConcurrently checks that creating wallets with
+// different identifiers is not serialized behind the registry write lock: both factory
+// calls must be able to be in flight at the same time.
+func TestWalletByID_DistinctWalletsAreCreatedConcurrently(t *testing.T) {
+	reg, _, r, wf := newRegistryWithFakes()
+	ctx := t.Context()
+	r.MapToIdentityStub = func(_ context.Context, id driver.WalletLookupID) (driver.Identity, string, error) {
+		identity, ok := toIdentityBytes(id)
+		require.True(t, ok)
+
+		return identity, "w-" + string(identity), nil
+	}
+	r.GetIdentityInfoStub = func(_ context.Context, wID string) (idriver.IdentityInfo, error) {
+		return &mockIdentityInfo{id: wID}, nil
+	}
+
+	// both factory calls must be inside NewWallet at the same time for this to unblock
+	var inFlight atomic.Int32
+	release := make(chan struct{})
+	wf.NewWalletStub = func(_ context.Context, id string, _ idriver.IdentityRoleType, _ role.IdentitySupport, _ idriver.IdentityInfo) (driver.Wallet, error) {
+		if inFlight.Add(1) == 2 {
+			close(release)
+		}
+		select {
+		case <-release:
+		case <-time.After(10 * time.Second):
+			return nil, errors.New("wallet creation is serialized: only one NewWallet call at a time")
+		}
+		w := &mock2.Wallet{}
+		w.IDReturns(id)
+
+		return w, nil
+	}
+
+	var wg sync.WaitGroup
+	res := make([]driver.Wallet, 2)
+	errs := make([]error, 2)
+	ids := []string{"ida", "idb"}
+	for i := range ids {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			res[i], errs[i] = reg.WalletByID(ctx, 0, []byte(ids[i]))
+		}(i)
+	}
+	wg.Wait()
+
+	for i := range ids {
+		require.NoError(t, errs[i])
+		require.Equal(t, "w-"+ids[i], res[i].ID())
+	}
+	require.Equal(t, 2, wf.NewWalletCallCount())
+}
+
+// toIdentityBytes is the test-side counterpart of the registry's identity conversion.
+func toIdentityBytes(id driver.WalletLookupID) (driver.Identity, bool) {
+	switch v := id.(type) {
+	case driver.Identity:
+		return v, true
+	case []byte:
+		return v, true
+	default:
+		return nil, false
+	}
 }
 
 func TestLookup_WithUnknownType_Error(t *testing.T) {

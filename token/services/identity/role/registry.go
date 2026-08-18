@@ -15,6 +15,7 @@ import (
 	idriver "github.com/LFDT-Panurus/panurus/token/services/identity/driver"
 	"github.com/LFDT-Panurus/panurus/token/services/logging"
 	"github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors"
+	"golang.org/x/sync/singleflight"
 )
 
 //go:generate counterfeiter -o mock/wf.go -fake-name WalletFactory . WalletFactory
@@ -31,6 +32,12 @@ type WalletFactory interface {
 //     RLocks for map reads and never holding locks while calling out to external
 //     services (identity provider, storage, wallet factory) to avoid blocking and
 //     potential deadlocks.
+//   - In particular, WalletMu MUST NOT be held while calling WalletFactory.NewWallet:
+//     wallet construction is expensive (pseudonym generation, storage access) and the
+//     factory receives the registry itself as IdentitySupport, so it may legitimately
+//     call back into it. sync.RWMutex is not reentrant, so any such callback would
+//     deadlock. Concurrent creations of the same wallet are instead coalesced with
+//     walletCreation (see WalletByID).
 type Registry struct {
 	Logger  logging.Logger
 	Role    idriver.Role
@@ -39,6 +46,11 @@ type Registry struct {
 	WalletFactory WalletFactory
 	WalletMu      sync.RWMutex
 	Wallets       map[string]driver.Wallet
+
+	// walletCreation coalesces concurrent WalletFactory.NewWallet calls for the same
+	// wallet identifier, so that a wallet is built at most once without holding
+	// WalletMu across the construction.
+	walletCreation singleflight.Group
 }
 
 // NewRegistry returns a new registry for the passed parameters.
@@ -245,6 +257,12 @@ func (r *Registry) GetWalletID(ctx context.Context, identity driver.Identity) (s
 	return wID, nil
 }
 
+// WalletByID returns the wallet bound to the passed lookup id, creating and registering it
+// on first use.
+//
+// Locking: WalletMu is only taken for short map reads/writes. WalletFactory.NewWallet is
+// always called with no lock held, so a factory may safely call back into the registry;
+// concurrent callers for the same wallet identifier are coalesced so the wallet is built once.
 func (r *Registry) WalletByID(ctx context.Context, role idriver.IdentityRoleType, id driver.WalletLookupID) (driver.Wallet, error) {
 	r.Logger.DebugfContext(ctx, "role [%d] lookup wallet by [%T]", role, id)
 	defer r.Logger.DebugfContext(ctx, "role [%d] lookup wallet by [%T] done", role, id)
@@ -281,21 +299,41 @@ func (r *Registry) WalletByID(ctx context.Context, role idriver.IdentityRoleType
 	}
 	r.Logger.DebugfContext(ctx, "no")
 
-	// Register the newly created wallet but check if another goroutine already created it.
-	r.WalletMu.Lock()
-	defer r.WalletMu.Unlock()
-	if existing, ok := r.Wallets[wID]; ok {
-		// Another goroutine created and registered the wallet in the meantime; prefer it.
-		return existing, nil
-	}
-	// Create the wallet without holding the registry lock (avoid holding locks while calling external code).
+	// Create the wallet without holding the registry lock (avoid holding locks while calling
+	// external code). singleflight guarantees that concurrent callers asking for the same
+	// wallet identifier share a single NewWallet call, so dropping the lock does not lead to
+	// duplicate wallets; creations for distinct identifiers proceed in parallel.
+	//
+	// Note: singleflight is not context-aware. A caller that joins an in-flight creation waits
+	// for the winning goroutine's NewWallet to finish even if its own ctx is cancelled in the
+	// meantime, and it then receives the winner's result (or error) built from the winner's ctx.
 	r.Logger.DebugfContext(ctx, "create wallet [%s]", wID)
-	newWallet, err := r.WalletFactory.NewWallet(ctx, wID, role, r, idInfo)
+	created, err, _ := r.walletCreation.Do(wID, func() (any, error) {
+		// Another goroutine may have created and registered the wallet in the meantime; prefer it.
+		r.WalletMu.RLock()
+		existing, ok := r.Wallets[wID]
+		r.WalletMu.RUnlock()
+		if ok {
+			return existing, nil
+		}
+
+		newWallet, err := r.WalletFactory.NewWallet(ctx, wID, role, r, idInfo)
+		if err != nil {
+			return nil, err
+		}
+		r.Logger.DebugfContext(ctx, "register wallet [%s:%s] with label [%s]", newWallet.ID(), wID, wID)
+		// Only the map write needs the write lock.
+		r.WalletMu.Lock()
+		r.Wallets[wID] = newWallet
+		r.WalletMu.Unlock()
+
+		return newWallet, nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	r.Logger.DebugfContext(ctx, "register wallet [%s:%s] with label [%s]", newWallet.ID(), wID, wID)
-	r.Wallets[wID] = newWallet
+	// the closure above only ever returns a driver.Wallet on success
+	newWallet := created.(driver.Wallet)
 
 	return newWallet, nil
 }

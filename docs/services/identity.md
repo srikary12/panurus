@@ -84,6 +84,32 @@ classDiagram
     note for wallet_Service "High-level management<br/>of wallets and roles"
 ```
 
+### Wallet Registry concurrency
+
+`role.Registry` (`token/services/identity/role/registry.go`) is the per-role wallet cache behind
+`wallet.Service`. Its contract:
+
+*   **`WalletMu` guards the `Wallets` map only.** It is taken as a short `RLock` for map reads and a
+    short `Lock` for map writes. It is never held while calling out to the identity provider, the
+    wallet store, or the wallet factory.
+*   **`WalletFactory.NewWallet` is always called with no registry lock held.** The factory receives the
+    registry itself as `IdentitySupport`, so it may call back into it (e.g. `BindIdentity`, or
+    registering the wallet it is building) while the wallet is under construction. `sync.RWMutex` is
+    not reentrant, so holding `WalletMu` across `NewWallet` would deadlock such a factory. Wallet
+    construction is also expensive (idemix pseudonym generation, store reads and writes), so holding
+    the lock across it would serialize every wallet creation for the role.
+*   **Concurrent creations of the *same* wallet identifier are coalesced**, not serialized:
+    `WalletByID` wraps construction in a `golang.org/x/sync/singleflight` group keyed by wallet id, so
+    exactly one `NewWallet` call runs per wallet and all concurrent callers receive the same wallet
+    instance. Creations for *distinct* wallet identifiers run in parallel.
+
+A `WalletFactory` implementation must therefore be safe to call concurrently for distinct wallet
+identifiers, and may assume no registry lock is held when it is invoked.
+
+Note that `singleflight` is not context-aware: a caller that joins an in-flight creation waits for
+the winning goroutine's `NewWallet` to finish even if its own context is cancelled in the meantime,
+and then receives the winner's result (or error), produced with the winner's context.
+
 ### LocalMembership
 
 The `LocalMembership` component (`token/services/identity/membership`) plays a pivotal role in managing local identities for a specific role (e.g., Owner, Issuer).
