@@ -28,9 +28,9 @@ func (s *signingIdentity) Serialize() ([]byte, error) { return s.serialized, nil
 func TestInstrumentSignerReturnsTheSignerUnwrapped(t *testing.T) {
 	signer := &dmock.Signer{}
 
-	assert.Same(t, signer, sigobserve.InstrumentSigner(t.Context(), signer, nil, "hash", sigobserve.RoleOwner))
-	assert.Same(t, signer, sigobserve.InstrumentSigner(t.Context(), signer, sigobserve.Nop, "hash", sigobserve.RoleOwner))
-	assert.Nil(t, sigobserve.InstrumentSigner(t.Context(), nil, &recorder{}, "hash", sigobserve.RoleOwner))
+	assert.Same(t, signer, sigobserve.InstrumentSigner(signer, nil, "hash", sigobserve.RoleOwner))
+	assert.Same(t, signer, sigobserve.InstrumentSigner(signer, sigobserve.Nop, "hash", sigobserve.RoleOwner))
+	assert.Nil(t, sigobserve.InstrumentSigner(nil, &recorder{}, "hash", sigobserve.RoleOwner))
 }
 
 func TestInstrumentSignerReportsSign(t *testing.T) {
@@ -39,7 +39,7 @@ func TestInstrumentSignerReportsSign(t *testing.T) {
 		signer := &dmock.Signer{}
 		signer.SignReturns([]byte("sigma"), nil)
 
-		wrapped := sigobserve.InstrumentSigner(t.Context(), signer, r, "hash", sigobserve.RoleOwner)
+		wrapped := sigobserve.InstrumentSigner(signer, r, "hash", sigobserve.RoleOwner)
 		sigma, err := wrapped.Sign([]byte("message"))
 		require.NoError(t, err)
 		assert.Equal(t, []byte("sigma"), sigma, "the wrapper must be transparent")
@@ -58,7 +58,7 @@ func TestInstrumentSignerReportsSign(t *testing.T) {
 		expected := errors.New("no key")
 		signer.SignReturns(nil, expected)
 
-		wrapped := sigobserve.InstrumentSigner(t.Context(), signer, r, "hash", sigobserve.RoleIssuer)
+		wrapped := sigobserve.InstrumentSigner(signer, r, "hash", sigobserve.RoleIssuer)
 		_, err := wrapped.Sign([]byte("message"))
 		require.ErrorIs(t, err, expected)
 
@@ -76,7 +76,7 @@ func TestInstrumentSignerPreservesSigningIdentity(t *testing.T) {
 	signer := &signingIdentity{Signer: &dmock.Signer{}, serialized: []byte("raw-identity")}
 	signer.SignReturns([]byte("sigma"), nil)
 
-	wrapped := sigobserve.InstrumentSigner(t.Context(), signer, r, "hash", sigobserve.RoleOwner)
+	wrapped := sigobserve.InstrumentSigner(signer, r, "hash", sigobserve.RoleOwner)
 	si, ok := wrapped.(driver.SigningIdentity)
 	require.True(t, ok, "a wrapped SigningIdentity must remain a SigningIdentity")
 
@@ -92,9 +92,9 @@ func TestInstrumentSignerPreservesSigningIdentity(t *testing.T) {
 func TestInstrumentVerifierReturnsTheVerifierUnwrapped(t *testing.T) {
 	verifier := &dmock.Verifier{}
 
-	assert.Same(t, verifier, sigobserve.InstrumentVerifier(t.Context(), verifier, nil, "hash", sigobserve.RoleOwner))
-	assert.Same(t, verifier, sigobserve.InstrumentVerifier(t.Context(), verifier, sigobserve.Nop, "hash", sigobserve.RoleOwner))
-	assert.Nil(t, sigobserve.InstrumentVerifier(t.Context(), nil, &recorder{}, "hash", sigobserve.RoleOwner))
+	assert.Same(t, verifier, sigobserve.InstrumentVerifier(verifier, nil, "hash", sigobserve.RoleOwner))
+	assert.Same(t, verifier, sigobserve.InstrumentVerifier(verifier, sigobserve.Nop, "hash", sigobserve.RoleOwner))
+	assert.Nil(t, sigobserve.InstrumentVerifier(nil, &recorder{}, "hash", sigobserve.RoleOwner))
 }
 
 func TestInstrumentVerifierReportsVerify(t *testing.T) {
@@ -103,7 +103,7 @@ func TestInstrumentVerifierReportsVerify(t *testing.T) {
 		verifier := &dmock.Verifier{}
 		verifier.VerifyReturns(nil)
 
-		wrapped := sigobserve.InstrumentVerifier(t.Context(), verifier, r, "hash", sigobserve.RoleAuditor)
+		wrapped := sigobserve.InstrumentVerifier(verifier, r, "hash", sigobserve.RoleAuditor)
 		require.NoError(t, wrapped.Verify([]byte("message"), []byte("sigma")))
 
 		message, sigma := verifier.VerifyArgsForCall(0)
@@ -122,7 +122,7 @@ func TestInstrumentVerifierReportsVerify(t *testing.T) {
 		expected := errors.New("invalid signature")
 		verifier.VerifyReturns(expected)
 
-		wrapped := sigobserve.InstrumentVerifier(t.Context(), verifier, r, "hash", sigobserve.RoleOwner)
+		wrapped := sigobserve.InstrumentVerifier(verifier, r, "hash", sigobserve.RoleOwner)
 		require.ErrorIs(t, wrapped.Verify([]byte("message"), []byte("sigma")), expected)
 
 		e := r.one(t)

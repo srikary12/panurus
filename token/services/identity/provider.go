@@ -360,7 +360,7 @@ func (p *Provider) getSigner(ctx context.Context, identity driver.Identity, idHa
 	}
 	t.DoneResolution(ctx, path, err)
 
-	return sigobserve.InstrumentSigner(ctx, signer, p.observer, idHash, sigobserve.RoleUnknown), err
+	return sigobserve.InstrumentSigner(signer, p.observer, idHash, sigobserve.RoleUnknown), err
 }
 
 // getSignerAndCache resolves the signer for identity. The returned path reports how the signer

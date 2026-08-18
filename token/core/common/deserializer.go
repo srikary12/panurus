@@ -80,7 +80,7 @@ func (d *Deserializer) getVerifier(ctx context.Context, vd driver.VerifierDeseri
 	verifier, err := vd.DeserializeVerifier(ctx, id)
 	t.Done(ctx, err)
 
-	return sigobserve.InstrumentVerifier(ctx, verifier, d.observer, principal, role), err
+	return sigobserve.InstrumentVerifier(verifier, d.observer, principal, role), err
 }
 
 // Recipients returns the recipient identities extracted from the passed identity.

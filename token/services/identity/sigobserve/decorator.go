@@ -20,14 +20,16 @@ import (
 // driver.SigningIdentity, the returned signer is one too, so callers that need Serialize
 // keep working through the wrapper.
 //
-// ctx is the context the events are reported with: Sign takes no context of its own, so the
-// resolution-time context is the only one available.
-func InstrumentSigner(ctx context.Context, signer driver.Signer, o Observer, principal string, role Role) driver.Signer {
+// Events are reported with context.Background(): Sign has no context of its own, and
+// storing a resolution-time context in the wrapper would pin a request-scoped span for the
+// full lifetime of the signer (which is process lifetime in the common case). The identity
+// and role fields on the event are enough for attribution and correlation.
+func InstrumentSigner(signer driver.Signer, o Observer, principal string, role Role) driver.Signer {
 	if signer == nil || o == nil || o == Nop {
 		return signer
 	}
 
-	base := instrumentedSigner{signer: signer, observer: o, principal: principal, role: role, ctx: ctx}
+	base := instrumentedSigner{signer: signer, observer: o, principal: principal, role: role}
 	if si, ok := signer.(driver.SigningIdentity); ok {
 		return &instrumentedSigningIdentity{instrumentedSigner: base, identity: si}
 	}
@@ -39,14 +41,13 @@ func InstrumentSigner(ctx context.Context, signer driver.Signer, o Observer, pri
 // OpVerify event, with a failed verification reported as OutcomeInvalid. The wrapper is
 // transparent, and a verifier is returned unwrapped when o drops events.
 //
-// ctx is the context the events are reported with, for the same reason as in
-// InstrumentSigner.
-func InstrumentVerifier(ctx context.Context, verifier driver.Verifier, o Observer, principal string, role Role) driver.Verifier {
+// Events are reported with context.Background() for the same reason as InstrumentSigner.
+func InstrumentVerifier(verifier driver.Verifier, o Observer, principal string, role Role) driver.Verifier {
 	if verifier == nil || o == nil || o == Nop {
 		return verifier
 	}
 
-	return &instrumentedVerifier{verifier: verifier, observer: o, principal: principal, role: role, ctx: ctx}
+	return &instrumentedVerifier{verifier: verifier, observer: o, principal: principal, role: role}
 }
 
 // instrumentedSigner reports the timing and outcome of each Sign call.
@@ -55,14 +56,13 @@ type instrumentedSigner struct {
 	observer  Observer
 	principal string
 	role      Role
-	ctx       context.Context
 }
 
 // Sign signs message with the wrapped signer, reporting the call as an OpSign event.
 func (s *instrumentedSigner) Sign(message []byte) ([]byte, error) {
 	t := Start(s.observer, OpSign, s.principal, s.role)
 	sigma, err := s.signer.Sign(message)
-	t.Done(s.ctx, err)
+	t.Done(context.Background(), err)
 
 	return sigma, err
 }
@@ -86,7 +86,6 @@ type instrumentedVerifier struct {
 	observer  Observer
 	principal string
 	role      Role
-	ctx       context.Context
 }
 
 // Verify checks sigma over message with the wrapped verifier, reporting the call as an
@@ -94,7 +93,7 @@ type instrumentedVerifier struct {
 func (v *instrumentedVerifier) Verify(message, sigma []byte) error {
 	t := Start(v.observer, OpVerify, v.principal, v.role)
 	err := v.verifier.Verify(message, sigma)
-	t.DoneVerify(v.ctx, err)
+	t.DoneVerify(context.Background(), err)
 
 	return err
 }
