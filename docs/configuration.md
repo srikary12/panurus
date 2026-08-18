@@ -1007,7 +1007,7 @@ Default values:
 - **burst**: Token bucket capacity, absorbing short spikes without raising the sustained rate; values below `rate` are raised to `rate`
 - **window**: Period over which the error and invalid-signature ratios are evaluated
 - **minSamples**: Minimum number of observations in a window before a ratio can escalate a principal
-- **errorRateThreshold**: Fraction of failing operations in a window that escalates a principal; `1` or more disables this trigger
+- **errorRateThreshold**: Fraction of failing operations in a window that escalates a principal; a value greater than `1` disables this trigger
 - **invalidSignatureRateThreshold**: Fraction of rejected verifications in a window that escalates a principal
 - **quotaReductionFactor**: Multiplier applied to `rate` and `burst` while a principal is soft-limited; must be in `(0,1]`
 - **softDuration**: Minimum time a principal stays on the reduced quota

@@ -209,7 +209,7 @@ token:
 | `burst` | `400` | Bucket capacity, absorbing short spikes without raising the sustained rate. Values below `rate` are raised to `rate`. |
 | `window` | `1m` | Evaluation period for the ratio thresholds. |
 | `minSamples` | `50` | Minimum observations in a window before a ratio can escalate a principal. |
-| `errorRateThreshold` | `0.5` | Failing-operation fraction that escalates. `1` or more disables this trigger. |
+| `errorRateThreshold` | `0.5` | Failing-operation fraction that escalates. A value greater than `1` disables this trigger. |
 | `invalidSignatureRateThreshold` | `0.2` | Rejected-verification fraction that escalates. Stricter than the error threshold: a healthy caller does not present bad signatures. |
 | `quotaReductionFactor` | `0.25` | Multiplier applied to `rate` and `burst` at level `soft`. Must be in `(0,1]`. |
 | `softDuration` | `5m` | Minimum time on a reduced quota. |

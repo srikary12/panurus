@@ -96,10 +96,11 @@ type Config struct {
 	// escalate a principal. Zero selects DefaultMinSamples.
 	MinSamples int `yaml:"minSamples,omitempty"`
 	// ErrorRateThreshold is the failing-operation fraction that escalates. Zero selects
-	// DefaultErrorRateThreshold; a value of 1 or more effectively disables this trigger.
+	// DefaultErrorRateThreshold; a value greater than 1 disables this trigger.
 	ErrorRateThreshold float64 `yaml:"errorRateThreshold,omitempty"`
 	// InvalidSignatureRateThreshold is the rejected-verification fraction that escalates.
-	// Zero selects DefaultInvalidSignatureRateThreshold.
+	// Zero selects DefaultInvalidSignatureRateThreshold; a value greater than 1 disables
+	// this trigger.
 	InvalidSignatureRateThreshold float64 `yaml:"invalidSignatureRateThreshold,omitempty"`
 	// QuotaReductionFactor multiplies Rate for a soft-limited principal. Zero selects
 	// DefaultQuotaReductionFactor. Must be in (0,1].
@@ -181,10 +182,10 @@ func (c *Config) Defaults() error {
 	}
 
 	if c.ErrorRateThreshold < 0 {
-		return errors.Errorf("invalid errorRateThreshold [%g], expected a fraction in [0,1]", c.ErrorRateThreshold)
+		return errors.Errorf("invalid errorRateThreshold [%g], expected a non-negative value (use > 1 to disable)", c.ErrorRateThreshold)
 	}
 	if c.InvalidSignatureRateThreshold < 0 {
-		return errors.Errorf("invalid invalidSignatureRateThreshold [%g], expected a fraction in [0,1]", c.InvalidSignatureRateThreshold)
+		return errors.Errorf("invalid invalidSignatureRateThreshold [%g], expected a non-negative value (use > 1 to disable)", c.InvalidSignatureRateThreshold)
 	}
 	if c.QuotaReductionFactor <= 0 || c.QuotaReductionFactor > 1 {
 		return errors.Errorf("invalid quotaReductionFactor [%g], expected a fraction in (0,1]", c.QuotaReductionFactor)
