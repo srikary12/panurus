@@ -17,6 +17,7 @@ Welcome to Panurus documentation.
 
 *   [**HTLC Deadlines and Clock Synchronisation**](security/htlc_deadline_clock_assumptions.md): The clock-synchronisation assumption that the HTLC claim/reclaim deadline rests on, and the deadline margin it requires of a deployment.
 *   [**Selector Resource Limits**](security/selector_resource_limits.md): How to throttle token selection by supplying a custom `Locker`.
+*   [**Store Integrity Verification**](security/store_integrity_verification.md): What each store verifies about the payloads it persists, what it requires of its caller, and what it deliberately does not check.
 
 ## Command-Line Tools
 

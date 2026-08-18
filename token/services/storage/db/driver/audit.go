@@ -46,11 +46,20 @@ type AuditTransactionStore interface {
 
 	// GetTokenRequest returns the token request bound to the passed transaction id, if available.
 	// It returns nil without error if the key is not found.
+	//
+	// Verification: a returned payload is a TokenRequestWithMetadata whose
+	// anchor is txID — see integrity.CheckStoredTokenRequest. This is the audit
+	// trail an auditor replays to attribute a transaction, so a payload anchored
+	// to another transaction would attribute the wrong one; it must be reported
+	// as an error rather than returned. Not-found stays nil, nil.
 	GetTokenRequest(ctx context.Context, txID string) ([]byte, error)
 
 	// GetTokenRequests returns the token requests bound to the given tx ids
 	// in a single query. Missing tx ids are absent from the returned map.
 	// Empty input returns an empty map without touching the database.
+	//
+	// Verification: as for GetTokenRequest, applied to every entry. One failing
+	// entry fails the whole call.
 	GetTokenRequests(ctx context.Context, txIDs []string) (map[string][]byte, error)
 
 	// AcquireRecoveryLeadership tries to acquire the PostgreSQL advisory lock backing the sweeper leader election.

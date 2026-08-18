@@ -227,6 +227,7 @@ func newInternalTestTMS(t *testing.T, toks []*token2.Token) (*token.ManagementSe
 	mockPP := &drivermock.PublicParameters{}
 	mockPP.PrecisionReturns(64)
 	mockPPM.PublicParametersReturns(mockPP)
+	mockPPM.PublicParamsHashReturns([]byte("pp-hash"))
 
 	mockTMS.PublicParamsManagerReturns(mockPPM)
 	mockTMS.TokensServiceReturns(&drivermock.TokensService{})
@@ -343,6 +344,7 @@ func TestCompleteInputsWithEmptyEID_ListTokensError(t *testing.T) {
 	mockPP := &drivermock.PublicParameters{}
 	mockPP.PrecisionReturns(64)
 	mockPPM.PublicParametersReturns(mockPP)
+	mockPPM.PublicParamsHashReturns([]byte("pp-hash"))
 	mockTMS.PublicParamsManagerReturns(mockPPM)
 	mockTMS.ValidatorReturns(&drivermock.Validator{}, nil)
 	mockTMS.TokensServiceReturns(&drivermock.TokensService{})
@@ -378,6 +380,7 @@ func TestCompleteInputsWithEmptyEID_ToQuantityError(t *testing.T) {
 	mockPP := &drivermock.PublicParameters{}
 	mockPP.PrecisionReturns(64)
 	mockPPM.PublicParametersReturns(mockPP)
+	mockPPM.PublicParamsHashReturns([]byte("pp-hash"))
 	mockTMS.PublicParamsManagerReturns(mockPPM)
 	mockTMS.ValidatorReturns(&drivermock.Validator{}, nil)
 	mockTMS.TokensServiceReturns(&drivermock.TokensService{})

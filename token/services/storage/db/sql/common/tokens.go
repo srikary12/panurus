@@ -23,6 +23,7 @@ import (
 	q "github.com/LFDT-Panurus/panurus/token/services/storage/db/sql/query"
 	common3 "github.com/LFDT-Panurus/panurus/token/services/storage/db/sql/query/common"
 	"github.com/LFDT-Panurus/panurus/token/services/storage/db/sql/query/cond"
+	"github.com/LFDT-Panurus/panurus/token/services/storage/integrity"
 	"github.com/LFDT-Panurus/panurus/token/services/utils"
 	"github.com/LFDT-Panurus/panurus/token/token"
 	"github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors"
@@ -1161,6 +1162,14 @@ func (db *TokenStore) PublicParams(ctx context.Context) ([]byte, error) {
 	return common.QueryUniqueContext[[]byte](ctx, db.readDB, query, args...)
 }
 
+// PublicParamsByHash returns the public parameters whose hash matches the passed
+// one, or nil if none are stored under it.
+//
+// Verification: the returned parameters are hashed and compared against rawHash
+// — see integrity.CheckPublicParamsHash. Callers fetch by hash in order to
+// re-validate a transaction against the setup it was created under, so
+// parameters that do not hash to the requested hash are reported rather than
+// returned.
 func (db *TokenStore) PublicParamsByHash(ctx context.Context, rawHash tdriver.PPHash) ([]byte, error) {
 	query, args := q.Select().
 		FieldsByName("raw").
@@ -1168,7 +1177,17 @@ func (db *TokenStore) PublicParamsByHash(ctx context.Context, rawHash tdriver.PP
 		Where(cond.Eq("raw_hash", rawHash)).
 		Format(db.ci)
 
-	return common.QueryUniqueContext[[]byte](ctx, db.readDB, query, args...)
+	raw, err := common.QueryUniqueContext[[]byte](ctx, db.readDB, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	if err := integrity.CheckPublicParamsHash(rawHash, raw); err != nil {
+		logger.ErrorfContext(ctx, "refusing to return public parameters: %v", err)
+
+		return nil, err
+	}
+
+	return raw, nil
 }
 
 func (db *TokenStore) StoreCertifications(ctx context.Context, certifications map[*token.ID][]byte) error {
