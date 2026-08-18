@@ -85,12 +85,14 @@ func NewSignatureService(deserializer driver.Deserializer, identityProvider driv
 	return s
 }
 
-// AuditorVerifier returns a signature verifier for the given auditor identity
+// AuditorVerifier returns a signature verifier for the given auditor identity.
+//
+// This operation is not gated: the identity always comes from the public parameters of the
+// token system, so the set of principals is tiny, fixed and not attacker-controlled. Applying
+// the rate-limit quota here would make DefaultRate a hard ceiling on transaction throughput
+// for the node, not a per-counterparty abuse limit. The operation is still instrumented
+// downstream in the deserializer.
 func (s *SignatureService) AuditorVerifier(ctx context.Context, id Identity) (Verifier, error) {
-	if err := s.allow(ctx, sigobserve.OpAuditorVerifier, sigobserve.RoleAuditor, id); err != nil {
-		return nil, err
-	}
-
 	return s.deserializer.GetAuditorVerifier(ctx, id)
 }
 
@@ -112,12 +114,13 @@ func (s *SignatureService) IssuerVerifier(ctx context.Context, id Identity) (Ver
 	return s.deserializer.GetIssuerVerifier(ctx, id)
 }
 
-// GetSigner returns a signer bound to the given identity
+// GetSigner returns a signer bound to the given identity.
+//
+// This operation is not gated: on the hot endorsement path it is called with the node's own
+// long-term signing identity, so all of a node's traffic would be charged to a single bucket
+// and DefaultRate would become a global TPS cap on endorsements. The operation is still
+// instrumented downstream in the identity provider.
 func (s *SignatureService) GetSigner(ctx context.Context, id Identity) (Signer, error) {
-	if err := s.allow(ctx, sigobserve.OpGetSigner, sigobserve.RoleUnknown, id); err != nil {
-		return nil, err
-	}
-
 	return s.identityProvider.GetSigner(ctx, id)
 }
 

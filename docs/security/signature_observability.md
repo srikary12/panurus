@@ -51,6 +51,27 @@ policy) but never gated.
 question about local state and have no way to express "refused". Returning `false` for an
 identity that is in fact ours would be a wrong answer, not a denial.
 
+`AuditorVerifier` and `GetSigner` are also **not gated**, even though they are
+client-facing, for a different reason: the identities they receive come from trusted
+fixed sources that are not attacker-controlled.
+
+- `AuditorVerifier` is called with auditor identities taken from the public parameters
+  of the token system. That set is tiny and fixed per deployment. Charging every
+  transaction to one of those buckets would make `DefaultRate` a hard ceiling on
+  transaction throughput for the node.
+- `GetSigner` is called on the hot endorsement path with the node's own long-term signing
+  identity. All endorsements on that node would share one bucket, so the 200 ops/s
+  default would be a global endorsement rate limit.
+
+Both operations are still instrumented downstream (in the deserializer and the identity
+provider respectively), so their events feed the metrics and the audit log. Only the
+gate is bypassed.
+
+Callers of `AuditorVerifier` must still be prepared for the error sentinel returned by a
+gated downstream: if the signature service ever returns `token.SignatureThrottled` — for
+example from a gated verifier inside the deserializer — callers should propagate it
+distinctly rather than folding it into a generic "failed verifying signature" error.
+
 ## Metrics
 
 All metrics are TMS-scoped: the `network`, `channel` and `namespace` labels are added by

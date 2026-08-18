@@ -103,6 +103,12 @@ func newGatedService(gate SignatureGate) *gatedService {
 
 // TestSignatureServiceDeniesEveryGatedOperation walks the whole client-facing surface, because a
 // gate that covers only some of it leaves the rest of the surface as the way around the policy.
+//
+// AuditorVerifier and GetSigner are intentionally absent: they are not gated because the
+// identities they use come from trusted fixed sources (public parameters and the node's own
+// long-term identity, respectively). Gating them would make DefaultRate a hard TPS ceiling on
+// normal transaction processing rather than a per-counterparty abuse limit. See
+// TestSignatureServiceTrustedOperationsAreNotGated.
 func TestSignatureServiceDeniesEveryGatedOperation(t *testing.T) {
 	id := Identity("an_identity")
 	tests := []struct {
@@ -111,16 +117,6 @@ func TestSignatureServiceDeniesEveryGatedOperation(t *testing.T) {
 		op   sigobserve.Op
 		role sigobserve.Role
 	}{
-		{
-			name: "AuditorVerifier",
-			call: func(s *SignatureService) error {
-				_, err := s.AuditorVerifier(t.Context(), id)
-
-				return err
-			},
-			op:   sigobserve.OpAuditorVerifier,
-			role: sigobserve.RoleAuditor,
-		},
 		{
 			name: "OwnerVerifier",
 			call: func(s *SignatureService) error {
@@ -140,16 +136,6 @@ func TestSignatureServiceDeniesEveryGatedOperation(t *testing.T) {
 			},
 			op:   sigobserve.OpIssuerVerifier,
 			role: sigobserve.RoleIssuer,
-		},
-		{
-			name: "GetSigner",
-			call: func(s *SignatureService) error {
-				_, err := s.GetSigner(t.Context(), id)
-
-				return err
-			},
-			op:   sigobserve.OpGetSigner,
-			role: sigobserve.RoleUnknown,
 		},
 		{
 			name: "RegisterSigner",
@@ -203,6 +189,32 @@ func TestSignatureServiceDeniesEveryGatedOperation(t *testing.T) {
 			assert.ErrorIs(t, events[0].Err, SignatureThrottled)
 		})
 	}
+}
+
+// TestSignatureServiceTrustedOperationsAreNotGated pins that AuditorVerifier and GetSigner
+// bypass the gate entirely. Their principals come from trusted fixed sources — public
+// parameters and the node's own identity — so there is no attacker-controlled input to
+// defend against, and applying the rate quota would make DefaultRate a hard TPS ceiling on
+// the node's own transaction throughput.
+func TestSignatureServiceTrustedOperationsAreNotGated(t *testing.T) {
+	gate := &denyingGate{}
+	g := newGatedService(gate)
+	id := Identity("an_identity")
+
+	// Both calls reach the downstream component even though the gate would deny them.
+	g.deserializer.GetAuditorVerifierReturns(&mock.Verifier{}, nil)
+	g.provider.GetSignerReturns(&mock.Signer{}, nil)
+
+	_, err := g.service.AuditorVerifier(t.Context(), id)
+	require.NoError(t, err, "AuditorVerifier must not be gated")
+
+	_, err = g.service.GetSigner(t.Context(), id)
+	require.NoError(t, err, "GetSigner must not be gated")
+
+	assert.Empty(t, gate.ops(), "the gate must not be consulted for trusted fixed-identity operations")
+	assert.Empty(t, g.events.all(), "no denial events are emitted for ungated operations")
+	assert.Equal(t, 1, g.deserializer.GetAuditorVerifierCallCount(), "AuditorVerifier reaches the deserializer")
+	assert.Equal(t, 1, g.provider.GetSignerCallCount(), "GetSigner reaches the identity provider")
 }
 
 // TestSignatureServiceReportsOnlyDenials pins the no-double-counting rule: the operations
