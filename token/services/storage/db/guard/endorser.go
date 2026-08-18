@@ -27,14 +27,10 @@ type guardedEndorserStore struct {
 	policy Policy
 }
 
-func (g *guardedEndorserStore) QueryValidations(ctx context.Context, params driver.QueryValidationRecordsParams) (driver.ValidationRecordsIterator, error) {
-	it, err := g.EndorserStore.QueryValidations(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-
-	return LimitIterator(it, g.policy.MaxPageSize, "QueryValidations"), nil
-}
+// QueryValidations is intentionally not row-capped and delegates to the embedded
+// store unchanged: QueryValidationRecordsParams carries no page-size or cursor,
+// so a caller that hits a cap has no way to page around it. Bounding this read
+// needs a SQL-level LIMIT on the query itself (tracked follow-up), not a wrapper.
 
 func (g *guardedEndorserStore) NewEndorserStoreTransaction() (driver.EndorserStoreTransaction, error) {
 	w, err := g.EndorserStore.NewEndorserStoreTransaction()

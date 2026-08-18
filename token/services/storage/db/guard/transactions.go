@@ -48,14 +48,12 @@ func (g *guardedOwnerTx) QueryTransactions(ctx context.Context, params driver.Qu
 	return g.TokenTransactionStore.QueryTransactions(ctx, params, p)
 }
 
-func (g *guardedOwnerTx) QueryTokenRequests(ctx context.Context, params driver.QueryTokenRequestsParams) (driver.TokenRequestIterator, error) {
-	it, err := g.TokenTransactionStore.QueryTokenRequests(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-
-	return LimitIterator(it, g.policy.MaxPageSize, "QueryTokenRequests"), nil
-}
+// QueryTokenRequests is intentionally not row-capped on either transaction store
+// and delegates to the embedded store unchanged: QueryTokenRequestsParams carries
+// only a status filter, with no page size or cursor, so a caller that hits a cap
+// cannot page around it. Bounding this read needs a SQL-level LIMIT on the query
+// itself (tracked follow-up). QueryTransactions above is capped instead, because
+// it does take a pagination argument, so rejecting an unbounded page is actionable.
 
 func (g *guardedOwnerTx) AddTransactionEndorsementAck(ctx context.Context, txID string, endorser token.Identity, sigma []byte) error {
 	if err := CheckPayload("AddTransactionEndorsementAck", len(txID)+len(endorser)+len(sigma), g.policy.MaxPayloadSize); err != nil {
@@ -85,15 +83,6 @@ func (g *guardedAuditTx) QueryTransactions(ctx context.Context, params driver.Qu
 	}
 
 	return g.AuditTransactionStore.QueryTransactions(ctx, params, p)
-}
-
-func (g *guardedAuditTx) QueryTokenRequests(ctx context.Context, params driver.QueryTokenRequestsParams) (driver.TokenRequestIterator, error) {
-	it, err := g.AuditTransactionStore.QueryTokenRequests(ctx, params)
-	if err != nil {
-		return nil, err
-	}
-
-	return LimitIterator(it, g.policy.MaxPageSize, "QueryTokenRequests"), nil
 }
 
 func (g *guardedAuditTx) NewTransactionStoreTransaction() (driver.TransactionStoreTransaction, error) {

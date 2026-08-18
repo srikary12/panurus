@@ -28,14 +28,12 @@ type guardedIdentityStore struct {
 	policy Policy
 }
 
-func (g *guardedIdentityStore) IteratorConfigurations(ctx context.Context, configurationType string) (idriver.IdentityConfigurationIterator, error) {
-	it, err := g.IdentityStore.IteratorConfigurations(ctx, configurationType)
-	if err != nil {
-		return nil, err
-	}
-
-	return LimitIterator(it, g.policy.MaxPageSize, "IteratorConfigurations"), nil
-}
+// IteratorConfigurations is intentionally not row-capped and delegates to the
+// embedded store unchanged. It takes no pagination argument, and
+// LocalMembership.storedIdentityConfigurations drains it in full on the identity
+// Load path, so a cap here would turn "this node has many registered identities"
+// into a hard identity-loading failure with no way for the caller to page around
+// it. Bounding this read needs a SQL-level LIMIT (tracked follow-up).
 
 func (g *guardedIdentityStore) AddConfiguration(ctx context.Context, wp idriver.IdentityConfiguration) error {
 	size := len(wp.ID) + len(wp.Type) + len(wp.URL) + len(wp.Config) + len(wp.Raw)

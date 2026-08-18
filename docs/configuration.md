@@ -720,9 +720,11 @@ token:
 
 ### Optional: token.storage.maxPageSize
 
-Maximum number of rows a single storage-service read may return. It bounds the pages
-accepted by paginated queries and caps streaming iterator reads so an unlimited scan
-cannot exhaust database resources. When the key is absent, the default (1000) applies.
+Maximum page size a paginated storage-service read may request, so an unlimited scan
+cannot exhaust database resources. A query that asks for an unbounded page (`nil` or
+`pagination.None()`) or a page larger than this value is rejected; callers page
+through the full result set instead. When the key is absent, the default (1000)
+applies.
 
 ```yaml
 token:
@@ -730,8 +732,10 @@ token:
     maxPageSize: 1000
 ```
 
-See [Storage API Limits](services/storage.md#storage-api-limits) for details,
-including why movement/balance queries are intentionally not row-capped.
+This bounds the paginated reads only. Streaming iterator reads are deliberately not
+row-capped, because they accept no page size for the caller to comply with — see
+[Storage API Limits](services/storage.md#storage-api-limits) for the full list and
+the reasoning, including why movement/balance queries are never row-capped.
 
 ---
 

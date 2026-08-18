@@ -367,25 +367,38 @@ writes include the transaction store's `AddTokenRequest` / `AddTransaction` /
 `RegisterIdentityDescriptor` / `AddConfiguration`, and the wallet store's
 `StoreIdentity`.
 
-**Read size limits.**
-- Paginated reads (`QueryTransactions`) require a bounded page: `nil` and
-  `pagination.None()` are rejected, and a page size larger than `maxPageSize`
-  (default 1000) is rejected. Callers page through the full result set.
-- Streaming iterator reads are capped at `maxPageSize` rows via a limiting iterator
-  that errors (rather than silently truncating) once the cap is exceeded. Covered
-  reads include the token store's unspent/spendable/unsupported iterators, the
-  endorser store's `QueryValidations`, the transaction store's `QueryTokenRequests`,
-  and the identity store's `IteratorConfigurations`.
-- `QueryMovements` is left uncapped on purpose: it feeds balance totals, and dropping
-  rows there would quietly return wrong balances. It is already narrowed by its
+**Read size limit.** `maxPageSize` (default 1000) bounds the paginated reads —
+currently `QueryTransactions` on the owner and audit transaction stores. Those
+reads require a bounded page: `nil` and `pagination.None()` are rejected, as is a
+page size larger than `maxPageSize`. Callers page through the full result set.
+
+Rejecting the request is only a safe way to bound a read when the caller has a way
+to comply, so the cap is applied exactly to the reads that accept a pagination
+argument. Streaming iterator reads are **not** row-capped:
+
+- The token store's unspent/spendable/unsupported iterators, the endorser store's
+  `QueryValidations`, the transaction store's `QueryTokenRequests`, and the identity
+  store's `IteratorConfigurations` all take no page size or cursor, and their
+  consumers drain them in full — the selectors and integrity checks for the token
+  iterators, and `LocalMembership.storedIdentityConfigurations` on the identity
+  `Load` path for `IteratorConfigurations`. Capping any of them would turn a large
+  but legitimate dataset into a hard failure that the caller cannot page around.
+- `QueryMovements` is uncapped for a second reason: it feeds balance totals, so
+  dropping rows would quietly return wrong balances. It is already narrowed by its
   required filters.
 
 You can override the limits in configuration (`token.storage.maxPayloadSize` /
 `token.storage.maxPageSize`) — see the [Configuration Guide](../configuration.md).
 
-**Not yet covered (tracked follow-up).** Reads that materialise a full slice/map
-before returning (e.g. `ListUnspentTokens`, `QueryTokenDetails`,
-`ConfigurationsByID`, `GetWalletIDs`) cannot be bounded by a wrapper alone — the SQL
-has already loaded everything — so they need a SQL-level `LIMIT` or conversion to
-iterators. The opaque `Keystore.Put` value and input-size caps for variadic id lists
+**Not yet covered (tracked follow-up).** Two groups of reads cannot be bounded by a
+wrapper at all, and need query-level work instead:
+
+- The streaming iterators listed above. Bounding them requires a SQL-level `LIMIT`
+  on the query (with a defined order and documented truncation) or adding paging to
+  their signatures, so the caller can ask for the next page rather than fail.
+- Reads that materialise a full slice or map before returning (e.g.
+  `ListUnspentTokens`, `QueryTokenDetails`, `ConfigurationsByID`, `GetWalletIDs`) —
+  the SQL has already loaded everything by the time the decorator sees the result.
+
+The opaque `Keystore.Put` value and input-size caps for variadic id lists
 (`DeleteTokens`, `GetTokens`) are in the same follow-up.
