@@ -123,6 +123,15 @@ jobs:
           - name: driver-config-key-field-round-trip
             pkg: ./token/driver
             func: FuzzConfigKeyFieldRoundTrip
+          - name: tcc-query-states-limits
+            pkg: ./token/services/network/fabric/tcc
+            func: FuzzQueryStatesLedgerReadsAreBounded
+          - name: tcc-are-tokens-spent-limits
+            pkg: ./token/services/network/fabric/tcc
+            func: FuzzAreTokensSpentLedgerReadsAreBounded
+          - name: tcc-query-tokens-limits
+            pkg: ./token/services/network/fabric/tcc
+            func: FuzzQueryTokensLedgerReadsAreBounded
 
     steps:
       - name: Checkout code

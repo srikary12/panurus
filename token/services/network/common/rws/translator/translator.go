@@ -134,7 +134,15 @@ func (t *Translator) AddPublicParamsDependency() error {
 func (t *Translator) QueryTokens(ctx context.Context, ids []*token.ID) ([][]byte, error) {
 	var res [][]byte
 	var errs []error
-	for _, id := range ids {
+	for i, id := range ids {
+		if id == nil {
+			// The ids come from an untrusted caller (the chaincode decodes them straight from a
+			// JSON array, where a `null` element decodes to a nil pointer), so a nil entry is an
+			// invalid request, not a programming error to panic on.
+			errs = append(errs, errors.Errorf("nil token id at index [%d]", i))
+
+			continue
+		}
 		outputID, err := t.KeyTranslator.CreateOutputKey(id.TxId, id.Index)
 		if err != nil {
 			errs = append(errs, errors.Errorf("error creating output ID: %s", err))

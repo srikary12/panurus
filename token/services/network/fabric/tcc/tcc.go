@@ -70,6 +70,18 @@ type TokenChaincode struct {
 
 	PPDigest             []byte
 	TokenServicesFactory func([]byte) (PublicParameters, Validator, error)
+
+	// QueryLimits bounds the work a single read-only query (queryStates, queryTokens,
+	// areTokensSpent) may perform. Any field left at zero falls back to DefaultQueryLimits(), so a
+	// chaincode built without configuring this field is still bounded.
+	QueryLimits QueryLimits
+}
+
+// effectiveQueryLimits returns the query limits to enforce: the configured ones, with
+// DefaultQueryLimits() overlaid onto any field left unset. Resolving here rather than at
+// construction time keeps a zero-value TokenChaincode bounded.
+func (cc *TokenChaincode) effectiveQueryLimits() QueryLimits {
+	return cc.QueryLimits.WithDefaults()
 }
 
 func (cc *TokenChaincode) Init(stub shim.ChaincodeStubInterface) *pb.Response {
@@ -283,9 +295,21 @@ func (cc *TokenChaincode) QueryPublicParams(stub shim.ChaincodeStubInterface) *p
 }
 
 func (cc *TokenChaincode) QueryTokens(idsRaw []byte, stub shim.ChaincodeStubInterface) *pb.Response {
+	limits := cc.effectiveQueryLimits()
+	if err := limits.CheckRequestSize(idsRaw); err != nil {
+		logger.Errorf("rejecting query tokens request: [%s]", err)
+
+		return shim.Error(err.Error())
+	}
+
 	var ids []*token2.ID
 	if err := json.Unmarshal(idsRaw, &ids); err != nil {
 		logger.Errorf("failed unmarshalling tokens ids: [%s]", err)
+
+		return shim.Error(err.Error())
+	}
+	if err := limits.CheckItemCount(len(ids)); err != nil {
+		logger.Errorf("rejecting query tokens request: [%s]", err)
 
 		return shim.Error(err.Error())
 	}
@@ -314,6 +338,15 @@ func (cc *TokenChaincode) QueryTokens(idsRaw []byte, stub shim.ChaincodeStubInte
 }
 
 func (cc *TokenChaincode) AreTokensSpent(idsRaw []byte, stub shim.ChaincodeStubInterface) *pb.Response {
+	// Check the payload size before initializing the validator: an oversized request must not pay
+	// for the (first-time) public parameters load either.
+	limits := cc.effectiveQueryLimits()
+	if err := limits.CheckRequestSize(idsRaw); err != nil {
+		logger.Errorf("rejecting are-tokens-spent request: [%s]", err)
+
+		return shim.Error(err.Error())
+	}
+
 	_, err := cc.GetValidator(Params)
 	if err != nil {
 		return shim.Error(err.Error())
@@ -322,6 +355,11 @@ func (cc *TokenChaincode) AreTokensSpent(idsRaw []byte, stub shim.ChaincodeStubI
 	var ids []string
 	if err := json.Unmarshal(idsRaw, &ids); err != nil {
 		logger.Errorf("failed unmarshalling tokens ids: [%s]", err)
+
+		return shim.Error(err.Error())
+	}
+	if err := limits.CheckItemCount(len(ids)); err != nil {
+		logger.Errorf("rejecting are-tokens-spent request: [%s]", err)
 
 		return shim.Error(err.Error())
 	}
@@ -346,9 +384,21 @@ func (cc *TokenChaincode) AreTokensSpent(idsRaw []byte, stub shim.ChaincodeStubI
 }
 
 func (cc *TokenChaincode) QueryStates(idsRaw []byte, stub shim.ChaincodeStubInterface) *pb.Response {
+	limits := cc.effectiveQueryLimits()
+	if err := limits.CheckRequestSize(idsRaw); err != nil {
+		logger.Errorf("rejecting query states request: [%s]", err)
+
+		return shim.Error(err.Error())
+	}
+
 	var keys []string
 	if err := json.Unmarshal(idsRaw, &keys); err != nil {
 		logger.Errorf("failed unmarshalling tokens ids: [%s]", err)
+
+		return shim.Error(err.Error())
+	}
+	if err := limits.CheckItemCount(len(keys)); err != nil {
+		logger.Errorf("rejecting query states request: [%s]", err)
 
 		return shim.Error(err.Error())
 	}

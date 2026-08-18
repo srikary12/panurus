@@ -48,6 +48,16 @@ The chaincode exposes the following functions:
 | `areTokensSpent` | Check if tokens are spent | Token IDs, metadata      | Boolean array |
 | `queryStates` | Query arbitrary state keys | State keys               | State values |
 
+### Query Limits
+
+`queryTokens`, `areTokensSpent` and `queryStates` each turn every element of the caller-supplied
+array into one ledger read within a single invocation, so both the raw argument size and the number
+of elements are bounded before any read happens (`MaxQueryRequestBytes`, default 1 MiB;
+`MaxQueryItems`, default 4096). The defaults apply even when the chaincode is built without
+configuring them, and the standalone chaincode process can override them via
+`TOKEN_QUERY_MAX_REQUEST_BYTES` / `TOKEN_QUERY_MAX_ITEMS`. Clients that need more keys than the cap
+must chunk their requests. See [Token Chaincode Query Limits](../security/tcc_query_limits.md).
+
 ### Chaincode Deployment
 
 The Token Chaincode must be deployed to the Fabric network before Panurus can operate:
