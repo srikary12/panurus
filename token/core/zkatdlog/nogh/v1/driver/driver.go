@@ -149,6 +149,12 @@ func (d *Driver) NewTokenService(tmsID driver.TMSID, publicParams []byte) (drive
 	if err != nil {
 		return nil, errors.Wrapf(err, "failed to initiliaze wallet service for [%s:%s]", tmsID.Network, tmsID.Namespace)
 	}
+	transferred := false
+	defer func() {
+		if !transferred {
+			sigStack.Stop()
+		}
+	}()
 	deserializer := ws.Deserializer
 	ip := ws.IdentityProvider
 
@@ -216,6 +222,7 @@ func (d *Driver) NewTokenService(tmsID driver.TMSID, publicParams []byte) (drive
 	// The stack gates this service's client-facing signature service and is released when the
 	// service is done with.
 	service.SetSignatureInstrumentation(sigStack)
+	transferred = true
 
 	return service, err
 }
