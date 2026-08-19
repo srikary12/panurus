@@ -3,8 +3,8 @@
 Self-assessment of Panurus against **Level 1** of the
 [OpenSSF Security Baseline](https://baseline.openssf.org), version **v2026.02.19**.
 
-- **Assessment date:** 2026-08-03
-- **Assessed release:** `v0.16.0`
+- **Assessment date:** 2026-08-19
+- **Assessed release:** `v0.17.0`
 - **Status legend and methodology:** see the [section overview](README.md)
 
 Level 1 applies to any project regardless of size. Requirement wording below is abbreviated; the

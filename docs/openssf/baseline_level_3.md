@@ -3,8 +3,8 @@
 Self-assessment of Panurus against **Level 3** of the
 [OpenSSF Security Baseline](https://baseline.openssf.org), version **v2026.02.19**.
 
-- **Assessment date:** 2026-08-03
-- **Assessed release:** `v0.16.0`
+- **Assessment date:** 2026-08-19
+- **Assessed release:** `v0.17.0`
 - **Status legend and methodology:** see the [section overview](README.md)
 
 Level 3 applies to code projects with a large, consistent user base and builds on
@@ -18,14 +18,14 @@ authoritative text is the
 
 | Control | Requirement | Status | Evidence / notes |
 |---------|-------------|--------|------------------|
-| `OSPS-AC-04.02` | Jobs are assigned only the minimum privileges necessary | **Partially Met** | Where permissions are declared they are minimal and deliberately scoped — [token-validation-benchmark.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/token-validation-benchmark.yml) keeps a read-only default token and grants `pull-requests: write` only to the job that never executes pull-request code. But [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml), [md_links.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/md_links.yml) and [protect-integration-test-types.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/protect-integration-test-types.yml) declare no `permissions:` at all, so their token scope is whatever the repository default happens to be. |
+| `OSPS-AC-04.02` | Jobs are assigned only the minimum privileges necessary | **Met** | Every workflow now declares a minimal, read-only default token and elevates only where needed: [token-validation-benchmark.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/token-validation-benchmark.yml) grants `pull-requests: write` only to the job that never executes pull-request code, [md_links.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/md_links.yml) adds `pull-requests: write` for link reporting, and the new [scorecard.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/scorecard.yml) keeps `read-all` at the top level and grants only `security-events: write` and `id-token: write` to its analysis job. [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml) and [protect-integration-test-types.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/protect-integration-test-types.yml), which previously declared none, now pin `contents: read`. |
 
 ## Build and Release
 
 | Control | Requirement | Status | Evidence / notes |
 |---------|-------------|--------|------------------|
-| `OSPS-BR-01.04` | Input from trusted collaborators is sanitized and validated before use | **Not Met** | [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml) interpolates the `workflow_dispatch` input `fsc-version` directly into a shell step (`go mod edit -replace=...=${{ github.event.inputs.fsc-version }}`, lines 35-37). The input comes from a trusted collaborator, but it is neither validated nor passed through an `env:` variable, which is exactly the pattern this control targets. |
-| `OSPS-BR-02.02` | Every asset in a release is clearly associated with the release identifier | **Met** | Releases publish only GitHub's auto-generated source archives, which are named after the tag, and each Go module carries a tag bearing the same version (`v0.16.0`, `cmd/tokengen/v0.16.0`, `integration/v0.16.0`, ...). |
+| `OSPS-BR-01.04` | Input from trusted collaborators is sanitized and validated before use | **Not Met** | [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml) interpolates the `workflow_dispatch` input `fsc-version` directly into a shell step (`go mod edit -replace=...=${{ github.event.inputs.fsc-version }}`, lines 38-40). The input comes from a trusted collaborator, but it is neither validated nor passed through an `env:` variable, which is exactly the pattern this control targets. |
+| `OSPS-BR-02.02` | Every asset in a release is clearly associated with the release identifier | **Met** | Releases publish only GitHub's auto-generated source archives, which are named after the tag, and each Go module carries a tag bearing the same version (`v0.17.0`, `cmd/tokengen/v0.17.0`, `integration/v0.17.0`, ...). |
 | `OSPS-BR-07.02` | A defined policy for storing, accessing and rotating secrets and credentials | **Not Met** | Workflows consume credentials only through the GitHub `secrets` context, but no document states who may add a secret, how access is reviewed, or when secrets are rotated. |
 
 ## Documentation
@@ -66,7 +66,7 @@ authoritative text is the
 | `OSPS-VM-04.02` | Non-exploitable vulnerabilities in components are accounted for in a VEX document | **Not Met** | No VEX documents are produced. |
 | `OSPS-VM-05.01` | A documented threshold for remediating SCA findings (vulnerabilities and licenses) | **Not Met** | No documented severity threshold for dependency findings. |
 | `OSPS-VM-05.02` | A documented policy to address SCA violations before any release | **Not Met** | The release process does not document a dependency-scanning gate. |
-| `OSPS-VM-05.03` | All changes are automatically evaluated against a documented policy for malicious and vulnerable dependencies, and blocked on violation | **Partially Met** | Automated dependency updates are demonstrably active — the `v0.16.0` release notes contain several `build(deps)` pull requests opened by Dependabot. However the repository contains no `.github/dependabot.yml`, the alerting configuration is not publicly readable, no documented policy exists, and no gate blocks a change on a dependency finding. |
+| `OSPS-VM-05.03` | All changes are automatically evaluated against a documented policy for malicious and vulnerable dependencies, and blocked on violation | **Partially Met** | Automated dependency updates are demonstrably active — the `v0.17.0` release notes contain several `build(deps)` pull requests opened by Dependabot — and the repository now checks in [.github/dependabot.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/dependabot.yml), which watches the SHA-pinned GitHub Actions weekly and groups major vs. minor/patch bumps into separate reviewable PRs (Go modules are intentionally out of scope, handled by the Nightly FSC workflow). Still missing for full compliance: the alerting configuration is not publicly readable, no documented remediation policy exists, and no gate blocks a change on a dependency finding. |
 | `OSPS-VM-06.01` | A documented threshold for remediating SAST findings | **Partially Met** | The de facto threshold is zero: [codeql-analysis.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/codeql-analysis.yml) scans every push and pull request, and the `checks` job of [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml) fails on any `golangci-lint`, `staticcheck`, `go vet` or `ineffassign` finding. That threshold is not written down anywhere, and CodeQL results are not gated. |
 | `OSPS-VM-06.02` | All changes are automatically evaluated for security weaknesses and blocked on violation | **Partially Met** | Evaluation happens on every pull request (CodeQL, `golangci-lint`, `staticcheck`, nightly fuzzing). Blocking is by convention: the only required status check on `main` is `DCO`, and the ruleset that required `CodeQL` is disabled — see `OSPS-QA-03.01` in [Level 2](baseline_level_2.md). |
 
@@ -74,13 +74,13 @@ authoritative text is the
 
 | Status | Count |
 |--------|------:|
-| Met | 3 |
-| Partially Met | 6 |
+| Met | 4 |
+| Partially Met | 5 |
 | Not Met | 12 |
 | Unverified | 0 |
 | **Total** | **21** |
 
-Level 3 is not a near-term goal. The cheapest wins that also help Level 2 are declaring workflow
-`permissions:`, passing the `fsc-version` input through `env:`, and writing down the SAST/SCA
-thresholds that CI already enforces in practice. Release signing plus SBOM and VEX generation are the
-substantial items.
+Level 3 is not a near-term goal. With workflow `permissions:` now declared on every workflow
+(`OSPS-AC-04.02`), the cheapest remaining wins that also help Level 2 are passing the `fsc-version`
+input through `env:` (`OSPS-BR-01.04`) and writing down the SAST/SCA thresholds that CI already
+enforces in practice. Release signing plus SBOM and VEX generation are the substantial items.

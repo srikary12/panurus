@@ -34,14 +34,14 @@ release-signing, SBOM, VEX and threat-modeling work that has not started.
 ## Assessment
 
 - **Assessed against:** OSPS Baseline **v2026.02.19** (the current release at the time of writing)
-- **Assessment date:** 2026-08-03
-- **Assessed release:** `v0.16.0`
+- **Assessment date:** 2026-08-19
+- **Assessed release:** `v0.17.0`
 
 | Level | Controls | Met | Partially met | Not met | Unverified |
 |-------|---------:|----:|--------------:|--------:|-----------:|
 | [Level 1](baseline_level_1.md) | 24 | 20 | 2 | 0 | 2 |
-| [Level 2](baseline_level_2.md) | 19 | 11 | 5 | 2 | 1 |
-| [Level 3](baseline_level_3.md) | 21 | 3 | 6 | 12 | 0 |
+| [Level 2](baseline_level_2.md) | 19 | 12 | 4 | 2 | 1 |
+| [Level 3](baseline_level_3.md) | 21 | 4 | 5 | 12 | 0 |
 
 Status values used in the per-level tables:
 
@@ -75,10 +75,10 @@ The assessment converges on a small number of themes rather than 20 unrelated it
    per PR, but the active branch ruleset requires zero approving reviews and only the DCO check, so
    the policy is honored by convention rather than enforced by the platform (`OSPS-QA-03.01`,
    `OSPS-QA-07.01`).
-6. **Undeclared workflow permissions.** Most workflows declare least-privilege `permissions:`, but
-   `tests.yml`, `md_links.yml` and `protect-integration-test-types.yml` do not, and one
-   `workflow_dispatch` input is interpolated straight into a shell step (`OSPS-AC-04.01`,
-   `OSPS-AC-04.02`, `OSPS-BR-01.04`).
+6. **Unsanitized pipeline input.** Every workflow now declares least-privilege `permissions:`
+   (`OSPS-AC-04.01`, `OSPS-AC-04.02` are met), but the `tests.yml` `workflow_dispatch` input
+   `fsc-version` is still interpolated straight into a shell step rather than passed through an
+   `env:` variable (`OSPS-BR-01.04`).
 
 ## How to reassess
 
@@ -99,7 +99,7 @@ The assessment converges on a small number of themes rather than 20 unrelated it
    gh api repos/LFDT-Panurus/panurus/rulesets/<id>
 
    # release assets, signatures and changelog
-   gh release view v0.16.0 --json tagName,assets,body
+   gh release view v0.17.0 --json tagName,assets,body
 
    # private vulnerability reporting and published advisories
    gh api repos/LFDT-Panurus/panurus/private-vulnerability-reporting

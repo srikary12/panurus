@@ -3,8 +3,8 @@
 Self-assessment of Panurus against **Level 2** of the
 [OpenSSF Security Baseline](https://baseline.openssf.org), version **v2026.02.19**.
 
-- **Assessment date:** 2026-08-03
-- **Assessed release:** `v0.16.0`
+- **Assessment date:** 2026-08-19
+- **Assessed release:** `v0.17.0`
 - **Status legend and methodology:** see the [section overview](README.md)
 
 Level 2 applies to code projects with at least two maintainers and a small, consistent user base, and
@@ -17,16 +17,16 @@ abbreviated; the authoritative text is the
 
 | Control | Requirement | Status | Evidence / notes |
 |---------|-------------|--------|------------------|
-| `OSPS-AC-04.01` | A CI/CD task with no permissions specified defaults to the lowest permissions in the pipeline | **Partially Met** | Five workflows declare explicit `permissions:` — [docs.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/docs.yml), [nightly-fsc.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/nightly-fsc.yml), [nightly-fuzz.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/nightly-fuzz.yml), [token-validation-benchmark.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/token-validation-benchmark.yml) and (per job) [codeql-analysis.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/codeql-analysis.yml). [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml), [md_links.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/md_links.yml) and [protect-integration-test-types.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/protect-integration-test-types.yml) declare none and therefore inherit the repository default, which is not publicly readable. |
+| `OSPS-AC-04.01` | A CI/CD task with no permissions specified defaults to the lowest permissions in the pipeline | **Met** | Every workflow now declares an explicit top-level `permissions:` block, so no task falls back to the repository default. The read-only default is set on [tests.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/tests.yml) (`contents: read`), [md_links.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/md_links.yml), [protect-integration-test-types.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/protect-integration-test-types.yml), [docs.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/docs.yml), [nightly-fsc.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/nightly-fsc.yml), [nightly-fuzz.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/nightly-fuzz.yml), [token-validation-benchmark.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/token-validation-benchmark.yml), and the new [scorecard.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/scorecard.yml) (`read-all`); [codeql-analysis.yml](https://github.com/LFDT-Panurus/panurus/blob/main/.github/workflows/codeql-analysis.yml) declares them per job. |
 
 ## Build and Release
 
 | Control | Requirement | Status | Evidence / notes |
 |---------|-------------|--------|------------------|
-| `OSPS-BR-02.01` | Every official release is assigned a unique version identifier | **Met** | Semantic version tags, most recently `v0.16.0` (2026-08-01), with matching per-module tags such as `cmd/tokengen/v0.16.0`. Conventions are documented in [versioning](../development/versioning.md). |
-| `OSPS-BR-04.01` | Each release contains a descriptive log of functional and security modifications | **Met** | GitHub release notes for `v0.16.0` list every merged pull request plus a full-changelog comparison link (`gh release view v0.16.0`). |
+| `OSPS-BR-02.01` | Every official release is assigned a unique version identifier | **Met** | Semantic version tags, most recently `v0.17.0` (2026-08-12), with matching per-module tags such as `cmd/tokengen/v0.17.0`. Conventions are documented in [versioning](../development/versioning.md). |
+| `OSPS-BR-04.01` | Each release contains a descriptive log of functional and security modifications | **Met** | GitHub release notes for `v0.17.0` list every merged pull request plus a full-changelog comparison link (`gh release view v0.17.0`). |
 | `OSPS-BR-05.01` | The build and release pipeline ingests dependencies with standardized tooling | **Met** | Go modules throughout; `make tidy` and the `tidy-check` target in [checks.mk](https://github.com/LFDT-Panurus/panurus/blob/main/checks.mk) keep `go.mod`/`go.sum` authoritative across all modules. |
-| `OSPS-BR-06.01` | Each release is signed, or covered by a signed manifest containing asset hashes | **Not Met** | `v0.16.0` publishes no release assets beyond GitHub's auto-generated source archives, there is no checksum manifest, and the release tags are lightweight tags rather than signed tag objects (`git cat-file -t v0.16.0` returns `commit`). Consumers verifying a module still get `go.sum` checksum protection, but the release itself is unsigned. |
+| `OSPS-BR-06.01` | Each release is signed, or covered by a signed manifest containing asset hashes | **Not Met** | `v0.17.0` publishes no release assets beyond GitHub's auto-generated source archives, there is no checksum manifest, and the release tags are lightweight tags rather than signed tag objects (`git cat-file -t v0.17.0` returns `commit`). Consumers verifying a module still get `go.sum` checksum protection, but the release itself is unsigned. |
 
 ## Documentation
 
@@ -76,14 +76,14 @@ abbreviated; the authoritative text is the
 
 | Status | Count |
 |--------|------:|
-| Met | 11 |
-| Partially Met | 5 |
+| Met | 12 |
+| Partially Met | 4 |
 | Not Met | 2 |
 | Unverified | 1 |
 | **Total** | **19** |
 
 Closing Level 2 requires, in rough order of effort: signing releases or publishing a signed checksum
 manifest (`OSPS-BR-06.01`), producing a security assessment (`OSPS-SA-03.01`), stating a disclosure
-timeframe (`OSPS-VM-01.01`), documenting the dependency selection policy (`OSPS-DO-06.01`), declaring
-`permissions:` in the three workflows that lack them (`OSPS-AC-04.01`), enforcing CI status checks on
-`main` (`OSPS-QA-03.01`), and describing maintainer responsibilities (`OSPS-GV-01.02`).
+timeframe (`OSPS-VM-01.01`), documenting the dependency selection policy (`OSPS-DO-06.01`), enforcing
+CI status checks on `main` (`OSPS-QA-03.01`), and describing maintainer responsibilities
+(`OSPS-GV-01.02`). Declaring `permissions:` on every workflow (`OSPS-AC-04.01`) is now done.
