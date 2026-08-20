@@ -49,6 +49,27 @@ When an FSC node starts or connects to a TMS, it must fetch the current public p
 - **Fetching**: The node uses the `PublicParamsFetcher` (provided by the **Network Service**) to query the ledger (via TCC or the Query Service).
 - **Local Cache**: Fetched parameters are cached in the node's local `PublicParametersStorage` to ensure they are available even if the network is temporarily unreachable.
 
+### Resolution Order
+
+`TMSProvider` (`token/core/tms.go`) resolves the public parameters of a TMS from four sources, in priority order:
+
+| # | Source | Description |
+| :--- | :--- | :--- |
+| 1 | `options` | The public parameters passed by the caller in `driver.ServiceOptions.PublicParams` (for example, the new parameters delivered by an update event). |
+| 2 | `storage` | The node's local `PublicParametersStorage`. |
+| 3 | `configuration` | The file referenced by `publicParameters.path` in the TMS configuration. |
+| 4 | `fetcher` | The `PublicParamsFetcher`, which reads the parameters from the ledger. This is the authoritative source. |
+
+For each source, the provider retrieves the parameters **and immediately tries to instantiate the token service with them**. The first source whose parameters the driver accepts wins, and its parameters become the ones the TMS runs with. A source is skipped, and the next one is given its chance, when it:
+
+- holds no public parameters, or fails to return them (storage error, missing file, …); or
+- holds public parameters the driver rejects — driver name/version skew (`invalid identifier, expecting [dlog.v1], got [dlog.v2]`), an unparsable container, an invalid curve id, or any other field-level validation failure; or
+- holds public parameters byte-identical to those a higher-priority source already tried (they are not deserialized twice).
+
+This is what lets a node recover on its own during an upgrade: when the local copy of the parameters is stale or malformed, it does not shadow the authoritative parameters on the ledger — the provider simply falls through to the fetcher.
+
+If no source produces usable public parameters, the returned error aggregates the failure of every source, each tagged with the source name, so the offending copy can be identified. The error wraps `ErrTMSNotFound` if, and only if, no source produced any parameters at all, which means the TMS has not been set up yet — as opposed to being set up with parameters this node cannot use.
+
 ---
 
 ## Dynamic Updates and Synchronization
