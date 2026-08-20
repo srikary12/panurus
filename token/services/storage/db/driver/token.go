@@ -364,8 +364,8 @@ type TokenLockStore interface {
 }
 
 var (
-	ErrTokenDoesNotExist   = errors.New("token does not exist")
+	ErrTokenDoesNotExist = errors.New("token does not exist")
 	// ErrTokenAlreadyLocked is returned by TokenLockStore.Lock when the token is
 	// already locked by another transaction (primary-key conflict on the lock row).
-	ErrTokenAlreadyLocked  = errors.New("token already locked")
+	ErrTokenAlreadyLocked = errors.New("token already locked")
 )
