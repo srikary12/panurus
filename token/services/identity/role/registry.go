@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 
 	"github.com/LFDT-Panurus/panurus/token/driver"
 	idriver "github.com/LFDT-Panurus/panurus/token/services/identity/driver"
@@ -38,6 +39,9 @@ type WalletFactory interface {
 //     call back into it. sync.RWMutex is not reentrant, so any such callback would
 //     deadlock. Concurrent creations of the same wallet are instead coalesced with
 //     walletCreation (see WalletByID).
+//   - Because construction runs outside the lock, it can overlap Done. Nothing may be
+//     written to the Wallets map once closed is set: Done has already dropped the cache
+//     and closed what it held, so a later entry would never be closed by anyone.
 type Registry struct {
 	Logger  logging.Logger
 	Role    idriver.Role
@@ -51,7 +55,17 @@ type Registry struct {
 	// wallet identifier, so that a wallet is built at most once without holding
 	// WalletMu across the construction.
 	walletCreation singleflight.Group
+
+	// closed is set by Done. It is guarded by WalletMu and exists because construction
+	// no longer runs under that lock: a creation still in flight when Done runs must not
+	// repopulate the cache Done has just dropped.
+	closed bool
 }
+
+// errRegistryClosed is returned by wallet creation once Done has run. The cache has been
+// dropped and its wallets closed, so a wallet created afterwards would be released by
+// nobody.
+var errRegistryClosed = errors.New("wallet registry is closed")
 
 // NewRegistry returns a new registry for the passed parameters.
 // A registry is bound to a given role, and it is persistent.
@@ -303,37 +317,122 @@ func (r *Registry) WalletByID(ctx context.Context, role idriver.IdentityRoleType
 	// external code). singleflight guarantees that concurrent callers asking for the same
 	// wallet identifier share a single NewWallet call, so dropping the lock does not lead to
 	// duplicate wallets; creations for distinct identifiers proceed in parallel.
-	//
-	// Note: singleflight is not context-aware. A caller that joins an in-flight creation waits
-	// for the winning goroutine's NewWallet to finish even if its own ctx is cancelled in the
-	// meantime, and it then receives the winner's result (or error) built from the winner's ctx.
 	r.Logger.DebugfContext(ctx, "create wallet [%s]", wID)
-	created, err, _ := r.walletCreation.Do(wID, func() (any, error) {
-		// Another goroutine may have created and registered the wallet in the meantime; prefer it.
-		r.WalletMu.RLock()
-		existing, ok := r.Wallets[wID]
-		r.WalletMu.RUnlock()
-		if ok {
-			return existing, nil
-		}
 
-		newWallet, err := r.WalletFactory.NewWallet(ctx, wID, role, r, idInfo)
-		if err != nil {
-			return nil, err
-		}
-		r.Logger.DebugfContext(ctx, "register wallet [%s:%s] with label [%s]", newWallet.ID(), wID, wID)
-		// Only the map write needs the write lock.
-		r.WalletMu.Lock()
-		r.Wallets[wID] = newWallet
-		r.WalletMu.Unlock()
+	return r.createWallet(ctx, role, wID, idInfo)
+}
 
-		return newWallet, nil
-	})
+// walletCreationJoinRetries bounds how many times a caller re-runs a creation that failed
+// with a context error it did not cause. Each retry either makes this caller the winner,
+// in which case only its own context can fail it, or joins a newer flight; the bound is
+// there so that an unbroken stream of cancelled callers cannot keep a caller with no
+// deadline of its own waiting forever.
+const walletCreationJoinRetries = 3
+
+// createWallet builds the wallet identified by wID, coalescing concurrent creations of the
+// same identifier into a single WalletFactory.NewWallet call so that dropping WalletMu
+// cannot produce duplicate wallets.
+//
+// singleflight hands the winning goroutine's value *and* error to everyone who joined the
+// same flight, and the winner builds the wallet with its own context. Neither may leak into
+// an unrelated caller, so this caller stops waiting when its own context is done rather
+// than when the winner's is, and a flight that failed only because another caller's context
+// was cancelled is retried rather than reported: one abandoned transaction must not fail
+// the healthy ones resolving the same wallet.
+func (r *Registry) createWallet(
+	ctx context.Context,
+	role idriver.IdentityRoleType,
+	wID idriver.WalletID,
+	idInfo idriver.IdentityInfo,
+) (driver.Wallet, error) {
+	for attempt := 0; ; attempt++ {
+		// ranCreation records whether this caller won the flight and ran the creation
+		// itself, which is what distinguishes its own context error from an inherited one.
+		// It is only read after receiving from ch, which happens after the creation
+		// returned.
+		var ranCreation atomic.Bool
+		ch := r.walletCreation.DoChan(wID, func() (any, error) {
+			ranCreation.Store(true)
+
+			return r.newWallet(ctx, role, wID, idInfo)
+		})
+
+		select {
+		case <-ctx.Done():
+			// The flight carries on for whoever else is waiting on it; this caller is done.
+			return nil, errors.Wrapf(ctx.Err(), "failed to create wallet [%s]", wID)
+		case res := <-ch:
+			if res.Err == nil {
+				wallet, ok := res.Val.(driver.Wallet)
+				if !ok || wallet == nil {
+					return nil, errors.Errorf("wallet creation for [%s] yielded %T, not a wallet", wID, res.Val)
+				}
+
+				return wallet, nil
+			}
+
+			// A context error this caller neither caused nor shares says nothing about
+			// whether the wallet can be built, so drop the cached failure and try again.
+			// Anything else - including a context error from the creation this caller ran
+			// itself - is its own error to report.
+			inherited := !ranCreation.Load() && ctx.Err() == nil &&
+				(errors.Is(res.Err, context.Canceled) || errors.Is(res.Err, context.DeadlineExceeded))
+			if !inherited || attempt >= walletCreationJoinRetries {
+				return nil, res.Err
+			}
+			r.Logger.DebugfContext(ctx,
+				"wallet [%s] creation failed with another caller's cancellation, retrying", wID)
+			r.walletCreation.Forget(wID)
+		}
+	}
+}
+
+// newWallet builds one wallet and puts it in the cache. It runs inside walletCreation, so
+// at most one goroutine executes it per wallet identifier at a time.
+func (r *Registry) newWallet(
+	ctx context.Context,
+	role idriver.IdentityRoleType,
+	wID idriver.WalletID,
+	idInfo idriver.IdentityInfo,
+) (any, error) {
+	// Another goroutine may have created and registered the wallet in the meantime; prefer
+	// it. An entry holding a nil wallet counts as absent, exactly as the fast path in
+	// WalletByID treats it, rather than being handed back as a wallet.
+	r.WalletMu.RLock()
+	existing, closed := r.Wallets[wID], r.closed
+	r.WalletMu.RUnlock()
+	if closed {
+		return nil, errRegistryClosed
+	}
+	if existing != nil {
+		return existing, nil
+	}
+
+	newWallet, err := r.WalletFactory.NewWallet(ctx, wID, role, r, idInfo)
 	if err != nil {
 		return nil, err
 	}
-	// the closure above only ever returns a driver.Wallet on success
-	newWallet := created.(driver.Wallet)
+	if newWallet == nil {
+		return nil, errors.Errorf("wallet factory returned no wallet for [%s]", wID)
+	}
+	r.Logger.DebugfContext(ctx, "register wallet [%s:%s] with label [%s]", newWallet.ID(), wID, wID)
+
+	// Only the map write needs the write lock. Done may have run while the wallet was being
+	// built: caching it now would resurrect a cache Done has already dropped and leave this
+	// wallet's resources - for an anonymous owner wallet, a provisioning goroutine - running
+	// with nothing left to close them. Close it here instead.
+	r.WalletMu.Lock()
+	if r.closed {
+		r.WalletMu.Unlock()
+		r.Logger.DebugfContext(ctx, "registry closed while creating wallet [%s], releasing it", wID)
+		if c, ok := newWallet.(closer); ok {
+			c.Close()
+		}
+
+		return nil, errRegistryClosed
+	}
+	r.Wallets[wID] = newWallet
+	r.WalletMu.Unlock()
 
 	return newWallet, nil
 }
@@ -353,6 +452,9 @@ type closer interface {
 // lifetime of the process.
 func (r *Registry) Done() error {
 	r.WalletMu.Lock()
+	// Set before dropping the cache, so a creation that completes after this point sees
+	// the registry as closed and releases the wallet it built instead of caching it.
+	r.closed = true
 	wallets := make([]driver.Wallet, 0, len(r.Wallets))
 	for _, w := range r.Wallets {
 		wallets = append(wallets, w)

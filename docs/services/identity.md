@@ -102,13 +102,26 @@ classDiagram
     `WalletByID` wraps construction in a `golang.org/x/sync/singleflight` group keyed by wallet id, so
     exactly one `NewWallet` call runs per wallet and all concurrent callers receive the same wallet
     instance. Creations for *distinct* wallet identifiers run in parallel.
+*   **A caller is never failed by another caller's cancellation.** `singleflight` is not
+    context-aware: it hands the winning goroutine's value *and* error to everyone who joined the same
+    flight, and the winner builds the wallet with its own context. `WalletByID` therefore waits on its
+    own context rather than the winner's — a caller whose context is cancelled while it waits returns
+    that cancellation immediately, and the creation carries on for whoever else is waiting on it — and
+    a flight that failed only because *another* caller's context was cancelled is retried instead of
+    reported, up to a small bound. What a caller still shares with the flight is the wallet itself:
+    the instance handed to every caller is the one the winner built.
+*   **Nothing is cached once `Done` has run.** Because construction happens outside `WalletMu`, it can
+    overlap `Done`, which drops the cache and closes the wallets it held. A creation that completes
+    after that point releases the wallet it built (closing it, if it holds resources) and returns an
+    error rather than repopulating the cache, since a wallet added afterwards would be closed by
+    nobody.
 
 A `WalletFactory` implementation must therefore be safe to call concurrently for distinct wallet
 identifiers, and may assume no registry lock is held when it is invoked.
 
-Note that `singleflight` is not context-aware: a caller that joins an in-flight creation waits for
-the winning goroutine's `NewWallet` to finish even if its own context is cancelled in the meantime,
-and then receives the winner's result (or error), produced with the winner's context.
+A wallet identifier registered with a `nil` wallet counts as absent, both on the fast path and when
+creation double-checks the cache; a factory that returns no wallet and no error is reported as an
+error.
 
 ### LocalMembership
 
