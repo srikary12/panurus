@@ -9,6 +9,7 @@ package upgrade
 import (
 	"testing"
 
+	"github.com/LFDT-Panurus/panurus/token/driver"
 	"github.com/LFDT-Panurus/panurus/token/token"
 	"github.com/stretchr/testify/require"
 )
@@ -35,11 +36,19 @@ func FuzzProofDeserializeNoPanic(f *testing.F) {
 	raw, err := p.Serialize()
 	require.NoError(f, err)
 
+	// a proof for a commitment token also declares the public parameters that produced it
+	withPPHashes := *p
+	withPPHashes.PublicParamsHashes = []driver.PPHash{[]byte("a public params hash")}
+	rawWithPPHashes, err := withPPHashes.Serialize()
+	require.NoError(f, err)
+
 	f.Add(raw)
+	f.Add(rawWithPPHashes)
 	f.Add([]byte{})
 	f.Add([]byte("malformed"))
 	f.Add([]byte("{"))
 	f.Add(raw[:len(raw)/2])
+	f.Add(rawWithPPHashes[:len(rawWithPPHashes)/2])
 
 	f.Fuzz(func(t *testing.T, raw []byte) {
 		if len(raw) > maxFuzzProofBytes {

@@ -27,14 +27,83 @@ The current driver determines compatibility based on several criteria:
 
 When in-place upgrade is not possible (e.g., moving to a completely incompatible cryptographic curve or increasing precision beyond limits), Panurus implements an atomic "Burn and Re-issue" protocol.
 
+Two disjoint families of formats reach this path:
+
+*   **Fabtoken outputs above `maxPrecision`** — cleartext outputs whose value range the current driver cannot represent.
+*   **ZKAT-DLOG outputs created under earlier public parameters** — see [Upgrading DLog tokens whose format changed](#upgrading-dlog-tokens-whose-format-changed) below.
+
 > [!NOTE]
-> **Eligibility is the complement of in-place support, by design.** For Fabtoken-to-DLog upgrades, a token's precision is either `<= maxPrecision` (in-place support, criterion 2 above — no issuer needed) or `> maxPrecision` (this path — issuer sign-off required because the value cannot be safely reinterpreted in a lower-precision format). These two ranges must never overlap: a driver that also accepted `<= maxPrecision` tokens into the Burn-and-Re-issue eligibility list would leave no token that ever needs this path, since every upgrade-eligible token would already be directly spendable. See the `Service` doc comment in `token/core/zkatdlog/nogh/v1/crypto/upgrade/service.go` for the implementation-level invariant.
+> **Eligibility is the complement of in-place support, by design.** For Fabtoken-to-DLog upgrades, a token's precision is either `<= maxPrecision` (in-place support, criterion 2 above — no issuer needed) or `> maxPrecision` (this path — issuer sign-off required because the value cannot be safely reinterpreted in a lower-precision format). These two ranges must never overlap: a driver that also accepted `<= maxPrecision` tokens into the Burn-and-Re-issue eligibility list would leave no token that ever needs this path, since every upgrade-eligible token would already be directly spendable. Whichever family a format belongs to, a format the driver already reports in `SupportedTokenFormats()` is always rejected here: burning a token that is perfectly spendable and minting a replacement would be pure loss. See the `Service` doc comment in `token/core/zkatdlog/nogh/v1/crypto/upgrade/service.go` for the implementation-level invariant.
 
 #### Step-by-Step Flow:
 1.  **Identification**: The owner identifies tokens that are no longer supported.
 2.  **Challenge-Response**: The owner requests a "challenge" from an authorized issuer.
 3.  **Proof Generation**: The owner generates an "upgrade proof" showing they own the old tokens and that the values match the intended new tokens.
 4.  **Atomic Transaction**: The issuer verifies the proof and submits a transaction that consumes the old tokens and issues new ones.
+
+### Upgrading DLog tokens whose format changed
+
+A ZKAT-DLOG output is a Pedersen commitment, and its `token.Format` is a digest that covers the
+Pedersen generators of the public parameters that produced it (`SupportedTokenFormat` in
+`token/core/zkatdlog/nogh/v1/token/service.go`). Regenerating the public parameters with different
+generators — or on a different curve — therefore **renames every token created before**: the driver
+no longer lists those formats in `SupportedTokenFormats()`, transfers skip the tokens, and they show
+up as unspendable even though they are perfectly safe and unspent on the ledger.
+
+Such a token cannot be reinterpreted in place: its commitment only opens under the bases of the
+generation that created it. It goes through the issuer-mediated path instead, and the issuer needs
+those old bases to learn what to re-issue.
+
+#### Protocol
+
+1.  The owner lists its unsupported tokens (`UnsupportedTokensIteratorBy`). For a DLog token, the
+    ledger entry it gets back carries both the **commitment** (`LedgerToken.Token`) and its
+    **opening** — type, value, blinding factor — in `LedgerToken.TokenMetadata`.
+2.  The owner resolves the **generation of public parameters** that produced the token's format by
+    matching the format against the public parameters it has stored locally
+    (`upgrade.PublicParamsHistory.ByFormat`), and puts that hash in the upgrade proof
+    (`Proof.PublicParamsHashes`, one entry per token, empty for Fabtoken entries).
+3.  The issuer looks the hash up in its own store (`PublicParamsByHash`), **re-checks that those
+    public parameters actually generate the format the token was recorded with**, and only then
+    opens the commitment with their Pedersen bases (`upgrade.PublicParamsHistory.ByHashAndFormat`
+    followed by `Token.ToClear`). This recovers the type and the value to re-issue.
+4.  The issuer assembles the usual upgrade transaction (`ttx.Transaction.Upgrade`). The ledger side
+    is format-agnostic: the issue action's inputs must exist and are deleted atomically with the new
+    issuance, so no old-format validation logic is needed on the ledger.
+
+The declared hash is only a lookup hint that saves the issuer a scan — it is never trusted on its
+own. Because the format digest is recomputed from the retrieved public parameters and compared with
+the format recorded on the ledger, the only bases the issuer will ever use are the ones that
+demonstrably produced that token; and because the opening must match the commitment, the owner
+cannot inflate the type or the value it gets back.
+
+#### Tracing a token back to its public parameters
+
+Panurus records the public parameters in two places, and both matter for this flow:
+
+*   **`PublicParams` table (TokenDB)** — every generation of public parameters the node ever
+    observed. `StorePublicParams` never overwrites an existing row, so the table is a history, and
+    `PublicParamsByHash` / `PublicParamsHashes` expose it (surfaced to drivers through
+    `driver.QueryEngine`). This is what makes the upgrade possible at all.
+*   **`Requests.pp_hash` (TTXDB / AuditDB)** — the hash of the public parameters in force when each
+    transaction was recorded, i.e. a per-`txID` trace of which generation created a token.
+
+> [!IMPORTANT]
+> **The issuer must retain the old public parameters.** An issuer whose `PublicParams` table no
+> longer holds the generation that created a token cannot open its commitment and will refuse the
+> upgrade (`failed to resolve the public parameters of token …`). Never prune that table, and when
+> rebuilding an issuer's TokenDB from scratch, re-import every historical public parameters version
+> before running upgrades. A node that joined the network after a regeneration only has the
+> generations published since it joined.
+
+> [!WARNING]
+> **Regenerate public parameters deliberately.** Since Pedersen generators are derived
+> deterministically from the driver name, driver version and curve
+> (`PublicParams.GeneratePedersenParameters`), re-running `tokengen` for the same driver, version and
+> curve reproduces the same bases and therefore the same formats — no upgrade needed. Formats only
+> change when the curve, the driver version, or the generation procedure itself changes. Before
+> publishing new public parameters, compare `SupportedTokenFormats()` before and after: if the set
+> changes, every existing token needs this upgrade path, and owners must be online to run it.
 
 ### Code Example: Identifying Unsupported Tokens
 
